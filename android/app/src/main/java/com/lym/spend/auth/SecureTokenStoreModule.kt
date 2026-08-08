@@ -8,7 +8,6 @@ import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import java.security.KeyStore
-import java.security.SecureRandom
 import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -94,11 +93,17 @@ class SecureTokenStoreModule(reactContext: ReactApplicationContext) :
   }
 
   private fun encrypt(value: String): String {
-    val iv = ByteArray(IV_SIZE).also(SecureRandom()::nextBytes)
+    // Android Keystore keys are generated with setRandomizedEncryptionRequired
+    // on by default, which REJECTS a caller-supplied IV on encrypt — passing one
+    // throws "Caller-provided IV not permitted". The keystore derives a fresh IV
+    // per operation, which is what we want anyway: reusing an IV under GCM is a
+    // catastrophic failure. Read it back off the cipher and store it alongside
+    // the ciphertext so decrypt can supply it.
     val cipher = Cipher.getInstance(TRANSFORMATION).apply {
-      init(Cipher.ENCRYPT_MODE, key(), GCMParameterSpec(TAG_BITS, iv))
+      init(Cipher.ENCRYPT_MODE, key())
     }
-    return "${encode(iv)}:${encode(cipher.doFinal(value.toByteArray(Charsets.UTF_8)))}"
+    val ciphertext = cipher.doFinal(value.toByteArray(Charsets.UTF_8))
+    return "${encode(cipher.iv)}:${encode(ciphertext)}"
   }
 
   private fun decrypt(value: String): String {
@@ -121,7 +126,6 @@ class SecureTokenStoreModule(reactContext: ReactApplicationContext) :
     private const val KEYSTORE = "AndroidKeyStore"
     private const val KEY_ALIAS = "spend_auth_aes_gcm_v1"
     private const val TRANSFORMATION = "AES/GCM/NoPadding"
-    private const val IV_SIZE = 12
     private const val TAG_BITS = 128
     private const val ERROR = "SECURE_STORAGE_ERROR"
   }
