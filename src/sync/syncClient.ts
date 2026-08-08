@@ -44,11 +44,19 @@ export class SpendSyncClient {
     return nativeSync.getDeadLetterCount();
   }
 
+  async pendingOutboxCount(): Promise<number> {
+    const rows = await nativeCoordinator.query<{ count: number | string }>(
+      "SELECT COUNT(*) AS count FROM outbox WHERE dead_lettered = 0",
+    );
+    return Number(rows[0]?.count ?? 0);
+  }
+
   private async run(): Promise<SyncReport> {
     const sessionRows = await nativeCoordinator.query<{ value: string }>(
       "SELECT value FROM sync_metadata WHERE key = 'owner_id'",
     );
     const userId = sessionRows[0]?.value;
+    console.log("[sync] owner_id =", userId ?? "(none — sync will no-op)");
     if (!userId) return { pushed: 0, pulled: 0, deadLetterCount: await this.deadLetterCount() };
 
     let pushed = 0;
@@ -86,15 +94,7 @@ export class SpendSyncClient {
       );
       if (rows.length === 0) return pushed;
 
-      const operations = rows.map((row) => ({
-        id: row.id,
-        deviceId: row.device_id || deviceId,
-        op: row.op,
-        tableName: row.table_name,
-        rowId: row.row_id,
-        payload: parsePayload(row.payload),
-        createdAt: row.created_at,
-      }));
+      const operations = rows.map((row) => toServerOperation(row));
       try {
         const response = await this.push(operations, deviceId);
         const appliedIds = idsFromResponse(response.applied);
@@ -139,7 +139,15 @@ export class SpendSyncClient {
       const nextCursor = typeof body.cursor === "string" ? body.cursor : cursor;
       const ops = body.ops ?? [];
       const commands = ops.map(normalizeRemoteCommand).map((command) => JSON.stringify(command));
-      await nativeSync.applyPulledOps(JSON.stringify(commands), nextCursor, userId);
+      console.log("[sync] pulled", ops.length, "ops; first =", JSON.stringify(ops[0] ?? null).slice(0, 260));
+      console.log("[sync] normalized first command =", commands[0]?.slice(0, 260) ?? "(none)");
+      try {
+        await nativeSync.applyPulledOps(JSON.stringify(commands), nextCursor, userId);
+        console.log("[sync] applied", commands.length, "commands, cursor ->", nextCursor);
+      } catch (applyError) {
+        console.log("[sync] APPLY FAILED:", applyError instanceof Error ? applyError.message : String(applyError));
+        throw applyError;
+      }
       total += ops.length;
       if (ops.length === 0 || nextCursor === cursor) return total;
       cursor = nextCursor;
@@ -163,6 +171,34 @@ function parsePayload(value: string): unknown {
   }
 }
 
+function toServerOperation(row: OutboxRow): SyncOperation {
+  const command = parsePayload(row.payload);
+  const commandRecord = command && typeof command === "object"
+    ? command as Record<string, unknown>
+    : null;
+  const commandPayload = commandRecord?.payload;
+  const fields = commandPayload && typeof commandPayload === "object" && !Array.isArray(commandPayload)
+    ? commandPayload
+    : { value: commandPayload ?? command };
+
+  // The server accepts SyncOp envelopes. Keep the command envelope on the
+  // operation as well so a later pull can replay the same command through the
+  // coordinator instead of treating the generic field payload as a mutation.
+  return {
+    opId: row.id,
+    entity: row.table_name,
+    entityId: row.row_id,
+    action: "upsert",
+    fields,
+    ...(typeof commandRecord?.payload === "object" && commandRecord.payload &&
+    typeof (commandRecord.payload as Record<string, unknown>).source === "string"
+      ? { source: (commandRecord.payload as Record<string, unknown>).source }
+      : {}),
+    ...(typeof commandRecord?.kind === "string" ? { kind: commandRecord.kind } : {}),
+    ...(commandRecord?.payload !== undefined ? { payload: commandRecord.payload } : {}),
+  };
+}
+
 function idsFromResponse(values: unknown[] | undefined): Set<string> {
   const ids = new Set<string>();
   for (const value of values ?? []) {
@@ -184,7 +220,25 @@ function normalizeRemoteCommand(operation: SyncOperation): Record<string, unknow
   const rawPayload = operation.payload;
   const payload = typeof rawPayload === "string" ? parsePayload(rawPayload) : rawPayload;
   if (payload && typeof payload === "object" && typeof (payload as Record<string, unknown>).kind === "string") {
-    return payload as Record<string, unknown>;
+    // Server ops carry the command under `fields` with an `opId`, which is the
+    // wire shape. The coordinator expects `payload` with a `commandId`, so
+    // translate rather than passing it through — otherwise every pulled command
+    // fails to parse and the whole batch aborts.
+    const remote = payload as Record<string, unknown>;
+    const fields = remote.fields;
+    const normalized: Record<string, unknown> = {
+      kind: remote.kind,
+      commandId: remote.commandId ?? remote.opId ?? operation.op_id ?? operation.opId,
+      payload: remote.payload ?? (fields && typeof fields === "object" ? fields : {}),
+    };
+    // expectedRevision is deliberately omitted for pulled ops. The server is
+    // authoritative for what it sends, and it has no view of this device's local
+    // revision; carrying a stale expectation would reject legitimate remote
+    // state. Local edits are still protected by the manual-provenance rule.
+    if (typeof remote.expectedRevision === "number") {
+      normalized.expectedRevision = remote.expectedRevision;
+    }
+    return normalized;
   }
   const inner = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
   return {

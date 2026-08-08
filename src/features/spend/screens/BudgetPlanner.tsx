@@ -14,6 +14,7 @@ import {
 } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import MaterialCommunityIcons from "react-native-vector-icons/MaterialCommunityIcons";
 import { useSpend } from "../store/SpendProvider";
 import SpendMonthPager from "../components/SpendMonthPager";
 import {
@@ -34,23 +35,6 @@ const parseAmount = (value: string): number | null => {
   if (!/^\d+(?:\.\d{1,2})?$/.test(trimmed)) return null;
   const amount = Number(trimmed);
   return Number.isFinite(amount) ? Math.round(amount * 100) : null;
-};
-
-const monthChoicesFor = (monthKey: string): string[] => {
-  const result = [monthKey];
-  let cursor = monthKey;
-  for (let index = 0; index < 2; index += 1) {
-    cursor = previousAccountingMonthKey(cursor);
-    result.unshift(cursor);
-  }
-  cursor = monthKey;
-  for (let index = 0; index < 2; index += 1) {
-    const [year, month] = cursor.split("-").map(Number);
-    const next = new Date(Date.UTC(year, month, 1));
-    cursor = `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, "0")}`;
-    result.push(cursor);
-  }
-  return result;
 };
 
 type SortMode = "amount" | "name" | "percent";
@@ -79,6 +63,7 @@ export default function BudgetPlanner() {
     categories,
     selectedMonth,
     setSelectedMonth,
+    availableMonths,
   } = useSpend();
   const monthKey = selectedMonth;
   const currentMonth = accountingMonthKey();
@@ -87,10 +72,6 @@ export default function BudgetPlanner() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [sortMode, setSortMode] = useState<SortMode>("amount");
   const [search, setSearch] = useState("");
-  const [drafts, setDrafts] = useState<Record<string, string>>({});
-  const [focusedIds, setFocusedIds] = useState<Record<string, boolean>>({});
-  const [renamingId, setRenamingId] = useState<string | null>(null);
-  const [renameDraft, setRenameDraft] = useState("");
   const [undo, setUndo] = useState<{
     categoryId: SpendCategoryId;
     label: string;
@@ -103,9 +84,17 @@ export default function BudgetPlanner() {
   const [addModalVisible, setAddModalVisible] = useState(false);
   const [newCategoryLabel, setNewCategoryLabel] = useState("");
   const [newCategoryParentId, setNewCategoryParentId] = useState<SpendCategoryId | null>(null);
+  const [newCategoryAmount, setNewCategoryAmount] = useState("");
   const [creatingCategory, setCreatingCategory] = useState(false);
   const [carryForwardBusy, setCarryForwardBusy] = useState(false);
+  const [editing, setEditing] = useState<PlannerOption | null>(null);
+  const [editLabel, setEditLabel] = useState("");
+  const [editAmount, setEditAmount] = useState("");
+  const [editRecurring, setEditRecurring] = useState(false);
+  const [savingEdit, setSavingEdit] = useState(false);
+  const editAmountRef = useRef<TextInput>(null);
   const addInputRef = useRef<TextInput>(null);
+  const addAmountRef = useRef<TextInput>(null);
   const timers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const commitChains = useRef<Record<string, Promise<void>>>({});
   const knownBudget = useRef<Record<string, { amountMinor: number; recurring: boolean }>>({});
@@ -142,8 +131,6 @@ export default function BudgetPlanner() {
   }, [categoryOptions, categories, categoryPreviewById, currentMonthBudget]);
 
   useEffect(() => {
-    setDrafts({});
-    setFocusedIds({});
     setExpanded({});
     setSearch("");
   }, [monthKey]);
@@ -151,6 +138,7 @@ export default function BudgetPlanner() {
   useEffect(() => () => {
     Object.values(timers.current).forEach(clearTimeout);
   }, []);
+
 
   const groups = useMemo<PlannerGroup[]>(() => {
     // Parent categories are aggregate-only: their budget is the sum of children,
@@ -240,37 +228,9 @@ export default function BudgetPlanner() {
     commitChains.current[option.id] = nextPromise;
   };
 
-  const startDraft = (option: PlannerOption) => {
-    if (readOnly || option.parentId === undefined && groups.some((group) => group.root.id === option.id && group.children.length > 0)) return;
-    setFocusedIds((current) => ({ ...current, [option.id]: true }));
-    setDrafts((current) => ({ ...current, [option.id]: formatRupees(knownBudget.current[option.id]?.amountMinor ?? option.budgetMinor) }));
-  };
 
-  const changeDraft = (option: PlannerOption, value: string) => {
-    if (readOnly) return;
-    setDrafts((current) => ({ ...current, [option.id]: value }));
-    if (timers.current[option.id]) clearTimeout(timers.current[option.id]);
-    if (parseAmount(value) === null) return;
-    timers.current[option.id] = setTimeout(() => commitAmount(option, value), 500);
-  };
 
-  const finishDraft = (option: PlannerOption) => {
-    if (timers.current[option.id]) clearTimeout(timers.current[option.id]);
-    const value = drafts[option.id];
-    setFocusedIds((current) => ({ ...current, [option.id]: false }));
-    if (value !== undefined) {
-      commitAmount(option, value);
-      if (parseAmount(value) !== null) setDrafts((current) => ({ ...current, [option.id]: formatRupees(parseAmount(value) ?? 0) }));
-      else setDrafts((current) => { const next = { ...current }; delete next[option.id]; return next; });
-    }
-  };
 
-  const stepAmount = (option: PlannerOption, changeMinor: number) => {
-    if (readOnly) return;
-    const current = knownBudget.current[option.id]?.amountMinor ?? option.budgetMinor;
-    const next = Math.max(0, current + changeMinor);
-    commitAmount(option, formatRupees(next));
-  };
 
   const undoLastEdit = async () => {
     if (!undo || undoing || readOnly) return;
@@ -287,26 +247,6 @@ export default function BudgetPlanner() {
     }
   };
 
-  const clearBudget = () => {
-    if (readOnly) return;
-    Alert.alert("Clear this month's budget?", "All category limits for this month will be removed.", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Clear budget",
-        style: "destructive",
-        onPress: async () => {
-          try {
-            await actions.clearMonthBudget(monthKey);
-            setDrafts({});
-            setUndo(null);
-            setNotice("This month's budget was cleared");
-          } catch (error) {
-            Alert.alert("Couldn't clear budget", error instanceof Error ? error.message : "Try again.");
-          }
-        },
-      },
-    ]);
-  };
 
   const carryForward = async () => {
     if (readOnly || carryForwardBusy) return;
@@ -321,98 +261,119 @@ export default function BudgetPlanner() {
     }
   };
 
-  const beginRename = (option: PlannerOption) => {
-    if (readOnly) return;
-    setRenamingId(option.id);
-    setRenameDraft(option.label);
-  };
 
-  const finishRename = async (option: PlannerOption) => {
-    const label = renameDraft.trim();
-    setRenamingId(null);
-    if (!label || label === option.label || readOnly) return;
-    try {
-      await actions.renameCategory(option.id, label);
-    } catch (error) {
-      Alert.alert("Couldn't rename category", error instanceof Error ? error.message : "Try again.");
-    }
-  };
 
   const rowHasChildren = (id: string) => groups.some((group) => group.root.id === id && group.children.length > 0);
 
+  const openEditor = (option: PlannerOption) => {
+    if (readOnly) return;
+    setEditing(option);
+    setEditLabel(option.label);
+    setEditAmount(option.budgetMinor > 0 ? formatRupees(option.budgetMinor) : "");
+    setEditRecurring(option.recurring);
+  };
+
+  const closeEditor = () => {
+    if (savingEdit) return;
+    setEditing(null);
+  };
+
+  const saveEditor = async () => {
+    if (!editing || savingEdit) return;
+    const label = editLabel.trim();
+    const amountMinor = editAmount.trim() === "" ? 0 : parseAmount(editAmount);
+    if (amountMinor === null) {
+      Alert.alert("Enter a valid amount", "Use digits only, for example 2500 or 2500.50.");
+      return;
+    }
+    setSavingEdit(true);
+    try {
+      if (label && label !== editing.label) {
+        await actions.renameCategory(editing.id, label);
+      }
+      if (amountMinor !== editing.budgetMinor || editRecurring !== editing.recurring) {
+        await actions.setBudgetAmount(monthKey, editing.id, amountMinor, editRecurring);
+        knownBudget.current[editing.id] = { amountMinor, recurring: editRecurring };
+      }
+      setEditing(null);
+    } catch (error) {
+      Alert.alert("Couldn't save", error instanceof Error ? error.message : "Try again.");
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
   const renderItem = ({ item }: { item: ListItem }) => {
     if (item.type === "section") return <Text style={styles.sectionTitle}>{item.label}</Text>;
+
     if (item.type === "group") {
-      const members = item.group.children.length > 0 ? item.group.children : [item.group.root];
+      const root = item.group.root;
+      const members = item.group.children.length > 0 ? item.group.children : [root];
       const budgetMinor = members.reduce((sum, option) => sum + option.budgetMinor, 0);
       const spentMinor = members.reduce((sum, option) => sum + option.spentMinor, 0);
       const pct = budgetMinor > 0 ? spentMinor / budgetMinor : 0;
       const isAggregate = item.group.children.length > 0;
+
+      // A parent row expands. Everything else is a single tap target that opens
+      // the editor sheet — no in-place text fields anywhere in the list.
       return (
         <Pressable
           style={styles.groupRow}
-          onPress={() => isAggregate && setExpanded((current) => ({ ...current, [item.group.root.id]: !current[item.group.root.id] }))}
-          onLongPress={() => beginRename(item.group.root)}
+          onPress={() =>
+            isAggregate
+              ? setExpanded((current) => ({ ...current, [root.id]: !current[root.id] }))
+              : openEditor(root)
+          }
         >
-          <View style={[styles.dot, { backgroundColor: item.group.root.tint }]} />
+          <View style={[styles.dot, { backgroundColor: root.tint }]} />
           <View style={styles.groupCopy}>
             <View style={styles.labelLine}>
-              {renamingId === item.group.root.id ? (
-                <TextInput
-                  value={renameDraft}
-                  onChangeText={setRenameDraft}
-                  onBlur={() => finishRename(item.group.root)}
-                  onSubmitEditing={() => finishRename(item.group.root)}
-                  autoFocus
-                  style={styles.renameGroupInput}
-                />
-              ) : <Text style={styles.groupLabel}>{item.group.root.label}</Text>}
+              <Text style={styles.groupLabel}>{root.label}</Text>
               {isAggregate ? <Text style={styles.aggregateTag}>ROLL-UP</Text> : null}
-              {isAggregate ? <Text style={styles.chevron}>{expanded[item.group.root.id] ? "⌃" : "⌄"}</Text> : null}
+              {isAggregate ? (
+                <MaterialCommunityIcons
+                  name={expanded[root.id] ? "chevron-up" : "chevron-down"}
+                  size={18}
+                  color="#9C8B5C"
+                />
+              ) : null}
             </View>
-            <View style={styles.track}><View style={[styles.fill, { width: `${Math.min(pct, 1) * 100}%`, backgroundColor: pct > 1 ? "#FF8E72" : item.group.root.tint }]} /></View>
-            <Text style={styles.meta}>{spendCurrency(spentMinor)} spent {budgetMinor > 0 ? `of ${spendCurrency(budgetMinor)}` : "· no budget"}</Text>
+            <View style={styles.track}>
+              <View style={[styles.fill, { width: `${Math.min(pct, 1) * 100}%`, backgroundColor: pct > 1 ? "#FF8E72" : root.tint }]} />
+            </View>
+            <Text style={styles.meta}>
+              {spendCurrency(spentMinor)} spent {budgetMinor > 0 ? `of ${spendCurrency(budgetMinor)}` : "· no budget"}
+              {!isAggregate && root.recurring ? " · recurring" : ""}
+            </Text>
           </View>
-          <Text style={styles.groupAmount}>{budgetMinor > 0 ? spendCurrency(budgetMinor) : "—"}</Text>
+          <View style={styles.amountBlock}>
+            <Text style={styles.amountValue}>{budgetMinor > 0 ? spendCurrency(budgetMinor) : "Set"}</Text>
+          </View>
         </Pressable>
       );
     }
+
     const option = item.option;
-    const value = focusedIds[option.id] ? drafts[option.id] ?? "" : formatRupees(knownBudget.current[option.id]?.amountMinor ?? option.budgetMinor);
     const pct = option.budgetMinor > 0 ? option.spentMinor / option.budgetMinor : 0;
     const delta = option.deltaMinor;
     return (
-      <View style={styles.childRow}>
+      <Pressable style={styles.childRow} onPress={() => openEditor(option)}>
         <View style={[styles.dot, { backgroundColor: option.tint }]} />
         <View style={styles.childCopy}>
-          {renamingId === option.id ? (
-            <TextInput value={renameDraft} onChangeText={setRenameDraft} onBlur={() => finishRename(option)} onSubmitEditing={() => finishRename(option)} autoFocus style={styles.renameInput} />
-          ) : (
-            <Pressable onPress={() => beginRename(option)}><Text style={styles.childLabel}>{option.label}</Text></Pressable>
-          )}
-          <View style={styles.track}><View style={[styles.fill, { width: `${Math.min(pct, 1) * 100}%`, backgroundColor: pct > 1 ? "#FF8E72" : option.tint }]} /></View>
-          <Text style={styles.meta}>{spendCurrency(option.spentMinor)} spent {option.budgetMinor > 0 ? `· ${spendCurrency(option.budgetMinor)} budget` : "· no budget"}{delta !== 0 ? ` · ${delta > 0 ? "↑" : "↓"} ${spendCurrency(Math.abs(delta))} vs last month` : ""}</Text>
+          <Text style={styles.childLabel}>{option.label}</Text>
+          <View style={styles.track}>
+            <View style={[styles.fill, { width: `${Math.min(pct, 1) * 100}%`, backgroundColor: pct > 1 ? "#FF8E72" : option.tint }]} />
+          </View>
+          <Text style={styles.meta}>
+            {spendCurrency(option.spentMinor)} spent {option.budgetMinor > 0 ? `· ${spendCurrency(option.budgetMinor)} budget` : "· no budget"}
+            {option.recurring ? " · recurring" : ""}
+            {delta !== 0 ? ` · ${delta > 0 ? "↑" : "↓"} ${spendCurrency(Math.abs(delta))} vs last month` : ""}
+          </Text>
         </View>
-        <View style={styles.amountEditor}>
-          <Pressable onPress={() => stepAmount(option, -100)} disabled={readOnly} style={styles.stepper}><Text style={styles.stepperText}>−</Text></Pressable>
-          <Text style={styles.currency}>₹</Text>
-          <TextInput
-            value={value}
-            onFocus={() => startDraft(option)}
-            onChangeText={(text) => changeDraft(option, text)}
-            onBlur={() => finishDraft(option)}
-            keyboardType="decimal-pad"
-            editable={!readOnly}
-            placeholder="0"
-            placeholderTextColor="#5C5240"
-            style={styles.amountInput}
-          />
-          <Pressable onPress={() => stepAmount(option, 100)} disabled={readOnly} style={styles.stepper}><Text style={styles.stepperText}>+</Text></Pressable>
+        <View style={styles.amountBlock}>
+          <Text style={styles.amountValue}>{option.budgetMinor > 0 ? spendCurrency(option.budgetMinor) : "Set"}</Text>
         </View>
-        <Pressable onPress={() => commitAmount(option, formatRupees(option.budgetMinor), !option.recurring)} disabled={readOnly} style={styles.recurringChip}>
-          <Text style={styles.recurringText}>{option.recurring ? "Recurring" : "One-off"}</Text>
-        </Pressable>
-      </View>
+      </Pressable>
     );
   };
 
@@ -426,10 +387,17 @@ export default function BudgetPlanner() {
     if (!label) return;
     setCreatingCategory(true);
     try {
-      await actions.createCategory(label, newCategoryParentId ? { parentId: newCategoryParentId } : undefined);
+      const created = await actions.createCategory(label, newCategoryParentId ? { parentId: newCategoryParentId } : undefined);
+      // Setting the amount here saves a second trip: naming a category and
+      // deciding what it is worth are the same thought.
+      const amountMinor = parseAmount(newCategoryAmount);
+      if (amountMinor !== null && amountMinor > 0 && created?.id) {
+        await actions.setBudgetAmount(monthKey, created.id, amountMinor, false);
+      }
       setAddModalVisible(false);
       setNewCategoryLabel("");
       setNewCategoryParentId(null);
+      setNewCategoryAmount("");
     } catch (error) {
       Alert.alert("Couldn't add category", error instanceof Error ? error.message : "Try again.");
     } finally {
@@ -439,7 +407,7 @@ export default function BudgetPlanner() {
 
   const listHeader = (
     <View>
-      <SpendMonthPager monthKey={monthKey} months={monthChoicesFor(monthKey)} onSelect={setSelectedMonth} />
+      <SpendMonthPager monthKey={monthKey} months={availableMonths} onSelect={setSelectedMonth} />
       <Text style={styles.title}>{spendMonthLabel(monthKey)} budget</Text>
       <Text style={styles.helper}>
         {readOnly ? "Read-only history · actuals and the budget set for this month" : "Limits save as you edit. Parents are aggregate-only roll-ups of their children."}
@@ -450,7 +418,6 @@ export default function BudgetPlanner() {
       </View>
       <View style={styles.actionRow}>
         <Pressable onPress={carryForward} disabled={readOnly || carryForwardBusy} style={styles.actionButton}><Text style={styles.actionText}>{carryForwardBusy ? "Carrying..." : "Carry forward recurring"}</Text></Pressable>
-        <Pressable onPress={clearBudget} disabled={readOnly} style={styles.actionButton}><Text style={[styles.actionText, styles.dangerText]}>Clear this month's budget</Text></Pressable>
       </View>
       <View style={styles.sortRow}>
         <Text style={styles.sortLabel}>SORT</Text>
@@ -478,15 +445,109 @@ export default function BudgetPlanner() {
 
       {undo ? <Pressable onPress={undoLastEdit} disabled={undoing} style={styles.snackbar}><Text style={styles.snackbarText}>{undoing ? "Undoing..." : `${undo.label} updated`}</Text><Text style={styles.undoText}>UNDO</Text></Pressable> : null}
 
-      <Modal animationType="fade" transparent visible={addModalVisible} onRequestClose={() => setAddModalVisible(false)}>
+      <Modal
+        animationType="slide"
+        transparent
+        visible={editing !== null}
+        onRequestClose={closeEditor}
+        onShow={() => setTimeout(() => editAmountRef.current?.focus(), 60)}
+      >
+        <View style={styles.modalBackdrop}>
+          <Pressable style={StyleSheet.absoluteFillObject} onPress={closeEditor} />
+          <View style={styles.editSheet}>
+            <View style={styles.sheetGrip} />
+            <Text style={styles.modalKicker}>Edit category</Text>
+
+            <Text style={styles.fieldLabel}>Category</Text>
+            <TextInput
+              value={editLabel}
+              onChangeText={setEditLabel}
+              placeholder="Category name"
+              placeholderTextColor="#665B43"
+              style={styles.modalInput}
+              returnKeyType="next"
+              onSubmitEditing={() => editAmountRef.current?.focus()}
+            />
+
+            <Text style={styles.fieldLabel}>Monthly amount</Text>
+            <View style={styles.modalAmountRow}>
+              <Text style={styles.modalCurrency}>₹</Text>
+              <TextInput
+                ref={editAmountRef}
+                value={editAmount}
+                onChangeText={setEditAmount}
+                placeholder="0"
+                placeholderTextColor="#665B43"
+                keyboardType="decimal-pad"
+                style={styles.modalAmountInput}
+                returnKeyType="done"
+                onSubmitEditing={saveEditor}
+              />
+            </View>
+
+            <Pressable onPress={() => setEditRecurring((value) => !value)} style={styles.recurringToggle}>
+              <MaterialCommunityIcons
+                name={editRecurring ? "checkbox-marked" : "checkbox-blank-outline"}
+                size={20}
+                color={editRecurring ? "#FFD27A" : "#6D6048"}
+              />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.recurringToggleLabel}>Recurring</Text>
+                <Text style={styles.recurringToggleHint}>Carries forward to next month. One-offs do not.</Text>
+              </View>
+            </Pressable>
+
+            <View style={styles.modalActions}>
+              <Pressable onPress={closeEditor} style={styles.modalButton}>
+                <Text style={styles.modalButtonText}>Cancel</Text>
+              </Pressable>
+              <Pressable onPress={saveEditor} disabled={savingEdit} style={[styles.modalButton, styles.modalButtonPrimary]}>
+                <Text style={styles.modalButtonPrimaryText}>{savingEdit ? "Saving..." : "Save"}</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        animationType="fade"
+        transparent
+        visible={addModalVisible}
+        onRequestClose={() => setAddModalVisible(false)}
+        onShow={() => setTimeout(() => addInputRef.current?.focus(), 60)}
+      >
         <View style={styles.modalBackdrop}><Pressable style={StyleSheet.absoluteFillObject} onPress={() => setAddModalVisible(false)} /><View style={styles.modalSheet}>
           <Text style={styles.modalKicker}>New category</Text><Text style={styles.modalTitle}>Name this category</Text>
-          <TextInput ref={addInputRef} value={newCategoryLabel} onChangeText={setNewCategoryLabel} placeholder="Rent, Family, Subscriptions..." placeholderTextColor="#665B43" style={styles.modalInput} autoFocus />
+          <TextInput
+            ref={addInputRef}
+            value={newCategoryLabel}
+            onChangeText={setNewCategoryLabel}
+            placeholder="Rent, Family, Subscriptions..."
+            placeholderTextColor="#665B43"
+            style={styles.modalInput}
+            returnKeyType="next"
+            onSubmitEditing={() => addAmountRef.current?.focus()}
+          />
+          <Text style={styles.parentLabel}>Monthly amount</Text>
+          <View style={styles.modalAmountRow}>
+            <Text style={styles.modalCurrency}>₹</Text>
+            <TextInput
+              ref={addAmountRef}
+              value={newCategoryAmount}
+              onChangeText={setNewCategoryAmount}
+              placeholder="0"
+              placeholderTextColor="#665B43"
+              keyboardType="decimal-pad"
+              style={styles.modalAmountInput}
+              returnKeyType="done"
+              onSubmitEditing={confirmAddCategory}
+            />
+          </View>
           {rootOptions.length > 0 ? <><Text style={styles.parentLabel}>Add under (optional)</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.parentChipWrap}>
             <Pressable onPress={() => setNewCategoryParentId(null)} style={[styles.parentChip, newCategoryParentId === null && styles.parentChipActive]}><Text style={styles.parentChipText}>None</Text></Pressable>
             {rootOptions.map((option) => <Pressable key={option.id} onPress={() => setNewCategoryParentId(option.id)} style={[styles.parentChip, { borderColor: option.tint }, newCategoryParentId === option.id && styles.parentChipActive]}><Text style={styles.parentChipText}>{option.label}</Text></Pressable>)}
           </ScrollView></> : null}
-          <View style={styles.modalActions}><Pressable onPress={() => setAddModalVisible(false)} style={styles.modalButton}><Text style={styles.modalButtonText}>Cancel</Text></Pressable><Pressable onPress={confirmAddCategory} disabled={creatingCategory || !newCategoryLabel.trim()} style={[styles.modalButton, styles.modalButtonPrimary]}><Text style={styles.modalButtonPrimaryText}>{creatingCategory ? "Adding..." : "Add"}</Text></Pressable></View>
+          <View style={styles.modalActions}><Pressable onPress={() => { setAddModalVisible(false); setNewCategoryAmount(""); }} style={styles.modalButton}><Text style={styles.modalButtonText}>Cancel</Text></Pressable><Pressable onPress={confirmAddCategory} disabled={creatingCategory || !newCategoryLabel.trim()} style={[styles.modalButton, styles.modalButtonPrimary]}><Text style={styles.modalButtonPrimaryText}>{creatingCategory ? "Adding..." : "Add"}</Text></Pressable></View>
         </View></View>
       </Modal>
     </KeyboardAvoidingView>
@@ -494,6 +555,25 @@ export default function BudgetPlanner() {
 }
 
 const styles = StyleSheet.create({
+  amountBlock: { flexDirection: "row", alignItems: "center", gap: 6 },
+  amountValue: { color: "#F5E6B8", fontSize: 17, fontWeight: "600" },
+  editSheet: {
+    backgroundColor: "#0E0C0A", borderTopLeftRadius: 26, borderTopRightRadius: 26,
+    borderTopWidth: 1, borderColor: "rgba(245,230,184,0.12)",
+    paddingHorizontal: 20, paddingTop: 12, paddingBottom: 30,
+  },
+  sheetGrip: { width: 42, height: 4, borderRadius: 2, backgroundColor: "#6D6048", alignSelf: "center", marginBottom: 18 },
+  fieldLabel: { color: "#9C8B5C", fontSize: 11, letterSpacing: 1.4, textTransform: "uppercase", fontWeight: "700", marginTop: 16, marginBottom: 6 },
+  recurringToggle: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 20 },
+  recurringToggleLabel: { color: "#D8CDB0", fontSize: 15, fontWeight: "600" },
+  recurringToggleHint: { color: "#6D6048", fontSize: 12, marginTop: 2 },
+  modalAmountRow: {
+    flexDirection: "row", alignItems: "center", gap: 8, marginTop: 6,
+    borderWidth: 1, borderColor: "rgba(245,230,184,0.12)", borderRadius: 12,
+    paddingHorizontal: 14, backgroundColor: "rgba(255,255,255,0.04)",
+  },
+  modalCurrency: { color: "#7A6B41", fontSize: 16 },
+  modalAmountInput: { flex: 1, color: "#F5E6B8", fontSize: 17, paddingVertical: 12 },
   container: { flex: 1, backgroundColor: "#070709", paddingHorizontal: 20 },
   back: { paddingVertical: 8 },
   backText: { color: "#9C8B5C", fontSize: 14 },
@@ -534,8 +614,6 @@ const styles = StyleSheet.create({
   amountEditor: { flexDirection: "row", alignItems: "center" },
   currency: { color: "#7A6B41", fontSize: 13 },
   amountInput: { color: "#F5E6B8", fontSize: 15, minWidth: 52, paddingVertical: 5, paddingHorizontal: 2, textAlign: "right" },
-  stepper: { paddingHorizontal: 4, paddingVertical: 5 },
-  stepperText: { color: "#FFD27A", fontSize: 18 },
   recurringChip: { marginLeft: 8, borderRadius: 999, backgroundColor: "rgba(255,210,122,0.10)", paddingVertical: 5, paddingHorizontal: 7 },
   recurringText: { color: "#9C8B5C", fontSize: 9 },
   addRow: { flexDirection: "row", alignItems: "center", paddingVertical: 18 },

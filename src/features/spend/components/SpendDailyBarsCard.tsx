@@ -104,7 +104,7 @@ export default function SpendDailyBarsCard({
       easing: Easing.bezier(0.23, 1, 0.32, 1),
       useNativeDriver: true,
     }).start();
-  }, [highlightAnim, selectedBucket]);
+  }, [highlightAnim, selectedBucket?.date]);
 
   useEffect(() => {
     if (!buckets.length) {

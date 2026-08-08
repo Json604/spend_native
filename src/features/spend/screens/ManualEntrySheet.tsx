@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Keyboard,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -127,7 +128,13 @@ export default function ManualEntrySheet() {
         <Text style={styles.dayPillText}>For {dayLabel}</Text>
       </View>
 
-      <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 32 }}>
+      <ScrollView
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+        onScrollBeginDrag={Keyboard.dismiss}
+        contentContainerStyle={{ paddingBottom: 32 }}
+      >
+        <Pressable onPress={Keyboard.dismiss} style={styles.dismissArea} accessible={false} />
         <Text style={styles.label}>Type</Text>
         <View style={styles.planRow}>
           <Pressable
@@ -273,6 +280,8 @@ export default function ManualEntrySheet() {
 }
 
 const styles = StyleSheet.create({
+  // Invisible catcher so a tap on empty space closes the keyboard.
+  dismissArea: { ...StyleSheet.absoluteFillObject, zIndex: -1 },
   container: { flex: 1, backgroundColor: "#070709", padding: 24 },
   back: { paddingVertical: 8 },
   backText: { color: "#9C8B5C", fontSize: 14 },

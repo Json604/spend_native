@@ -4,6 +4,11 @@
     <item name="android:windowOptOutEdgeToEdgeEnforcement" tools:targetApi="35">true</item>
     <item name="colorPrimary">@color/colorPrimary</item>
     <item name="android:statusBarColor">#070709</item>
+    <!-- Theme.AppCompat.DayNight defaults the window background to WHITE in
+         light mode. That window is what shows before the first React frame and
+         behind any transition that exposes it — the white flash. -->
+    <item name="android:windowBackground">#070709</item>
+    <item name="android:navigationBarColor">#070709</item>
   </style>
   <style name="Theme.App.SplashScreen" parent="AppTheme">
     <item name="android:windowBackground">@drawable/ic_launcher_background</item>

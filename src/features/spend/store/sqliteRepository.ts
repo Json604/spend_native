@@ -139,6 +139,32 @@ export class SpendConflictError extends Error {
 export class SqliteSpendRepository implements SpendDataRepository {
   constructor(private readonly coordinator: DatabaseCoordinator = nativeCoordinator) {}
 
+  /**
+   * Months the user actually has something in — any transaction or any budget —
+   * plus the current month, newest first. Derived from the database rather than
+   * generated, so the picker never offers an empty month the user never used,
+   * and never hides one they did.
+   */
+  async monthsWithData(): Promise<string[]> {
+    const rows = await this.coordinator.query<SqlRow>(
+      `SELECT month_key FROM (
+         SELECT DISTINCT accounting_month_key AS month_key
+           FROM transactions
+          WHERE deleted_at IS NULL AND status <> 'ignored'
+         UNION
+         SELECT DISTINCT month_key FROM budgets
+       )
+       WHERE month_key IS NOT NULL AND month_key <= ?
+       ORDER BY month_key DESC`,
+      [accountingMonthKey()],
+    );
+    const months = rows
+      .map((row) => String(row.month_key))
+      .filter((month) => /^\d{4}-\d{2}$/.test(month));
+    const current = accountingMonthKey();
+    return months.includes(current) ? months : [current, ...months];
+  }
+
   async monthSummary(monthKey: string) {
     const [row] = await this.coordinator.query<SqlRow>(
       `SELECT
@@ -208,19 +234,37 @@ export class SqliteSpendRepository implements SpendDataRepository {
       [monthKey],
     );
     const today = currentAccountingDateKey();
-    return rows.map((row) => {
-      const date = stringValue(row.date_key);
+    const byDate = new Map(
+      rows.map((row) => [
+        stringValue(row.date_key),
+        { amountMinor: numberValue(row.amount_minor), transactionCount: numberValue(row.transaction_count) },
+      ]),
+    );
+
+    // Emit EVERY day of the month, not only days that already have spending.
+    // A day with no transactions still needs to exist so it can be selected and
+    // a past-dated entry added to it — grouping over existing rows alone made
+    // the first week of a month unreachable.
+    const [year, month] = monthKey.split("-").map(Number);
+    const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+    const lastDay = monthKey === today.slice(0, 7) ? Number(today.slice(8, 10)) : daysInMonth;
+
+    const buckets: SpendDailyBucket[] = [];
+    for (let day = 1; day <= lastDay; day += 1) {
+      const date = `${monthKey}-${String(day).padStart(2, "0")}`;
       const dateObject = new Date(`${date}T00:00:00+05:30`);
-      return {
+      const totals = byDate.get(date);
+      buckets.push({
         date,
-        dayLabel: date.slice(8, 10).replace(/^0/, ""),
+        dayLabel: String(day),
         weekdayLabel: new Intl.DateTimeFormat("en-IN", { weekday: "short", timeZone: ACCOUNTING_TIME_ZONE }).format(dateObject).charAt(0),
         fullLabel: new Intl.DateTimeFormat("en-IN", { weekday: "short", day: "numeric", month: "short", timeZone: ACCOUNTING_TIME_ZONE }).format(dateObject),
-        amountMinor: numberValue(row.amount_minor),
-        transactionCount: numberValue(row.transaction_count),
+        amountMinor: totals?.amountMinor ?? 0,
+        transactionCount: totals?.transactionCount ?? 0,
         isToday: date === today,
-      };
-    });
+      });
+    }
+    return buckets;
   }
 
   async transactionsForDay(dateKey: string): Promise<SpendTransaction[]> {

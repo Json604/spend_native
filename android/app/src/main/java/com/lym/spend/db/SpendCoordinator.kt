@@ -406,6 +406,27 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
   ): CommandResult {
     val payload = command.payload
     val now = System.currentTimeMillis()
+
+    // A category with this LABEL may already exist under a different id — the
+    // device creates categories from SMS ingest before a sync ever arrives, and
+    // categories_active_label_idx is unique on lower(label) where deleted_at IS
+    // NULL. Treat that as the same category rather than failing: an id clash or
+    // a label clash both mean "this category is already here". Without this a
+    // single collision aborts an entire pulled batch, which silently blocked
+    // 500 ops from ever applying.
+    val existingId = database.rawQuery(
+      """SELECT id FROM categories
+          WHERE (id = ? OR lower(label) = lower(?)) AND deleted_at IS NULL
+          LIMIT 1""",
+      arrayOf(payload.categoryId, payload.label),
+    ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+
+    if (existingId != null) {
+      // Idempotent no-op. Do NOT rewrite the existing row: the local one may
+      // carry edits the incoming op predates.
+      return applied(command, existingId, categoryRevision(database, existingId))
+    }
+
     database.execSQL(
       """INSERT INTO categories (
            id, label, tint, parent_id, is_system, catalog_version, updated_at, revision
@@ -429,6 +450,20 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
   ): CommandResult {
     val revision = categoryRevision(database, command.payload.categoryId)
     assertExpectedRevision(command.payload.categoryId, command.expectedRevision, revision)
+
+    // categories_active_label_idx is unique on lower(label) among live rows. A
+    // pulled rename can collide with a category this device already created
+    // from SMS ingest, and because a pulled batch runs in ONE transaction, a
+    // raw UNIQUE violation aborts every remaining op. Treat a clash as a no-op:
+    // the label the user wants already exists.
+    val clash = database.rawQuery(
+      """SELECT id FROM categories
+          WHERE lower(label) = lower(?) AND id <> ? AND deleted_at IS NULL
+          LIMIT 1""",
+      arrayOf(command.payload.label, command.payload.categoryId),
+    ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+    if (clash != null) return applied(command, command.payload.categoryId, revision)
+
     database.execSQL(
       """UPDATE categories SET label = ?, revision = revision + 1, updated_at = ?
          WHERE id = ? AND revision = ?""",
@@ -797,6 +832,10 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     CommandResult.Noop(command.commandId, command.kind, entityId, revision, reason)
 
   private fun assertExpectedRevision(entityId: String, expected: Int, actual: Int) {
+    // SKIP_REVISION_CHECK marks a server-authoritative pulled op, which cannot
+    // know this device's local revision. Everything originating on-device still
+    // carries a real expectation and is checked normally.
+    if (expected == SKIP_REVISION_CHECK) return
     if (expected != actual) throw ConflictError(entityId, expected, actual)
   }
 

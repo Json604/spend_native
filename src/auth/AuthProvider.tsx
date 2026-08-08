@@ -1,5 +1,4 @@
 import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { Alert } from "react-native";
 import { signInWithGoogle, restoreAuthSession, signOut as signOutAuth, type AuthSession, type AuthUser } from "./authClient";
 import { secureDeviceId } from "./secureTokenStore";
 import { nativeSync } from "../sync/nativeSync";
@@ -56,7 +55,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       await claim(next);
       setSession(next);
     } catch (error) {
-      Alert.alert("Sign-in unavailable", error instanceof Error ? error.message : String(error));
       throw error;
     }
   }, [claim]);

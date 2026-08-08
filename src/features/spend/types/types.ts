@@ -291,6 +291,8 @@ export type SpendContextType = {
   currentMonthBudget: MonthlyBudget | null;
   selectedMonth: string;
   setSelectedMonth: (monthKey: string) => void;
+  /** Months the user actually has data for, newest first. Never generated. */
+  availableMonths: string[];
   dailyBuckets: SpendDailyBucket[];
   getTransactionsForDay: (dateKey: string) => Promise<SpendTransaction[]>;
   actions: {

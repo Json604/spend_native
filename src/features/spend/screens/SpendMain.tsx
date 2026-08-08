@@ -40,11 +40,12 @@ export default function SpendMain() {
     currentMonthBudget,
     selectedMonth,
     setSelectedMonth,
+    availableMonths,
     getTransactionsForDay,
     dailyBuckets,
     actions,
   } = useSpend();
-  const { user, signIn, signOut } = useAuth();
+  const { user } = useAuth();
 
   const [refreshing, setRefreshing] = useState(false);
   const [reviewModalVisible, setReviewModalVisible] = useState(false);
@@ -82,22 +83,6 @@ export default function SpendMain() {
   }, [activeBucket?.date, getTransactionsForDay, domain.state.transactions.length]);
 
   const monthName = useMemo(() => spendMonthLabel(selectedMonth), [selectedMonth]);
-  const monthChoices = useMemo(() => {
-    const choices = [selectedMonth];
-    let cursor = selectedMonth;
-    for (let index = 0; index < 2; index += 1) {
-      cursor = previousAccountingMonthKey(cursor);
-      choices.unshift(cursor);
-    }
-    cursor = selectedMonth;
-    for (let index = 0; index < 2; index += 1) {
-      const [year, month] = cursor.split("-").map(Number);
-      const next = new Date(Date.UTC(year, month, 1));
-      cursor = `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, "0")}`;
-      choices.push(cursor);
-    }
-    return choices;
-  }, [selectedMonth]);
 
   // Deep-link routing
   useEffect(() => {
@@ -214,24 +199,16 @@ export default function SpendMain() {
         <View style={styles.titleRow}>
           <Text style={styles.pageTitle}>Spend</Text>
           <Pressable
-            accessibilityLabel={user ? "Sign out" : "Sign in with Google"}
-            onPress={async () => {
-              try {
-                if (user) await signOut();
-                else await signIn();
-              } catch {
-                // AuthProvider already explains sign-in failures. Keep offline
-                // spend capture usable even when account auth is unavailable.
-              }
-            }}
+            accessibilityLabel={user ? "Open profile" : "Sign in"}
+            onPress={() => navigation.navigate(user ? "Profile" : "SignIn")}
             style={styles.accountButton}
           >
-            <MaterialCommunityIcons name={user ? "account-check-outline" : "google"} size={17} color="#FFD27A" />
-            <Text style={styles.accountButtonText}>{user ? "Account" : "Sign in"}</Text>
+            <MaterialCommunityIcons name={user ? "account-circle-outline" : "account-outline"} size={20} color="#FFD27A" />
+            <Text style={styles.accountButtonText}>{user ? "Profile" : "Sign in"}</Text>
           </Pressable>
         </View>
 
-        <SpendMonthPager monthKey={selectedMonth} months={monthChoices} onSelect={setSelectedMonth} />
+        <SpendMonthPager monthKey={selectedMonth} months={availableMonths} onSelect={setSelectedMonth} />
         {selectedMonth < accountingMonthKey() ? (
           <Text style={styles.readOnlyHint}>{monthName} is read-only. Actuals and the budget set for that month are preserved.</Text>
         ) : null}

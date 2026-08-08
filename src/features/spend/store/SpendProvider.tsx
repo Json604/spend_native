@@ -47,7 +47,7 @@ const SpendContext = createContext<SpendContextType | undefined>(undefined);
 const initialSyncStates: SpendSyncState[] = [
   {
     source: "sms",
-    status: "needs_permission",
+    status: "idle",
     label: "SMS inbox",
     detail: "Android-only. Best for bank, card, and UPI debit alerts.",
     accent: "rgba(255, 215, 0, 0.85)",
@@ -129,7 +129,10 @@ function buildLoadedData(
       spentMinor: row.spentMinor,
       budgetMinor: row.budgetedMinor > 0 ? row.budgetedMinor : undefined,
       pct: row.budgetedMinor > 0 ? row.spentMinor / row.budgetedMinor : 0,
-      deltaMinor: row.spentMinor - (previousSpent.get(row.categoryId) ?? 0),
+      // undefined means "no comparable previous month", which the card skips.
+      deltaMinor: previousSpent.has(row.categoryId)
+        ? row.spentMinor - (previousSpent.get(row.categoryId) ?? 0)
+        : undefined,
       parentId: row.parentId,
       depth: row.parentId ? 1 : 0,
     }));
@@ -184,6 +187,7 @@ export function SpendProvider({ children }: { children: ReactNode }) {
   const { user } = useAuth();
   const repository = sqliteRepository;
   const [selectedMonth, setSelectedMonth] = useState(accountingMonthKey());
+  const [availableMonths, setAvailableMonths] = useState<string[]>([accountingMonthKey()]);
   const [loaded, setLoaded] = useState<LoadedSpendData | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncStates, setSyncStates] = useState(initialSyncStates);
@@ -203,9 +207,14 @@ export function SpendProvider({ children }: { children: ReactNode }) {
         : report.deadLetterCount
           ? `${report.deadLetterCount} operation${report.deadLetterCount === 1 ? "" : "s"} need attention.`
           : "Account sync is up to date.",
-      lastSyncedAt: new Date().toISOString(),
+      ...(report.error ? {} : { lastSyncedAt: new Date().toISOString() }),
     });
   }, [updateSyncState, user]);
+
+  const getTransactionsForDay = useCallback(
+    (dateKey: string) => repository.getTransactionsForDay(dateKey),
+    [repository],
+  );
 
   const reload = useCallback(async (monthKey = selectedMonth) => {
     const [summary, breakdown, previousBreakdown, transactions, review, budget, daily, categories] = await Promise.all([
@@ -218,6 +227,7 @@ export function SpendProvider({ children }: { children: ReactNode }) {
       repository.dailyBuckets(monthKey),
       repository.categories(monthKey),
     ]);
+    repository.monthsWithData().then(setAvailableMonths).catch(() => undefined);
     setLoaded(buildLoadedData(monthKey, syncStates, transactions, categories, breakdown, previousBreakdown, summary, review, budget, daily));
   }, [repository, selectedMonth, syncStates]);
 
@@ -409,8 +419,9 @@ export function SpendProvider({ children }: { children: ReactNode }) {
       currentMonthBudget: data.currentMonthBudget,
       selectedMonth,
       setSelectedMonth,
+      availableMonths,
       dailyBuckets: data.dailyBuckets,
-      getTransactionsForDay: repository.getTransactionsForDay.bind(repository),
+      getTransactionsForDay,
       actions: {
         grantSmsAccess,
         refreshSmsInbox,

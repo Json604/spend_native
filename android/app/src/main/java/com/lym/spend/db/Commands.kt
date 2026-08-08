@@ -2,6 +2,9 @@ package com.lym.spend.db
 
 import org.json.JSONObject
 
+/** Marks a pulled op as server-authoritative: no optimistic-concurrency check. */
+internal const val SKIP_REVISION_CHECK = -1
+
 enum class TransactionDirection(val wireValue: String) {
   DEBIT("debit"),
   CREDIT("credit"),
@@ -292,7 +295,15 @@ sealed class Command(open val commandId: String, val kind: String) {
     internal fun fromJsonString(value: String): Command {
       val json = JSONObject(value)
       val commandId = json.getString("commandId")
-      val expectedRevision = { json.getInt("expectedRevision") }
+      // Pulled ops carry no expectedRevision: the server is authoritative for
+      // what it sends and has no view of this device's local revision, so
+      // carrying an expectation would reject legitimate remote state. Absent
+      // means "skip the optimistic-concurrency check"; local edits remain
+      // protected by the manual-provenance rule.
+      val expectedRevision = {
+        if (json.has("expectedRevision")) json.getInt("expectedRevision")
+        else SKIP_REVISION_CHECK
+      }
       val payload = json.getJSONObject("payload")
 
       return when (json.getString("kind")) {
