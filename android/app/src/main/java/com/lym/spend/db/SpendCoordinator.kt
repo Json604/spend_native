@@ -149,6 +149,23 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     val transaction = command.payload.transaction
     val now = System.currentTimeMillis()
 
+    // This transaction may already be here. The device creates it from the SMS
+    // as it arrives, under its own command id; the server later replays the
+    // same creation under a DIFFERENT op id, so processed_commands cannot
+    // recognise the repeat and the INSERT hits transactions.id — one collision
+    // aborts the entire pulled batch and sync stops dead.
+    //
+    // Treat it as the idempotent no-op it is. Deliberately a full no-op: the
+    // allocation and any learned category already exist too, and re-running the
+    // classifier here could overwrite a categorisation the user has since made
+    // by hand.
+    val existingRevision = scalarInt(
+      database,
+      "SELECT revision FROM transactions WHERE id = ?",
+      arrayOf(transaction.id),
+    )
+    if (existingRevision != null) return applied(command, transaction.id, existingRevision)
+
     database.execSQL(
       """INSERT INTO transactions (
            id, occurred_at, received_at, accounting_month_key, amount_minor,

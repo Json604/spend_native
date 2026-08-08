@@ -422,3 +422,40 @@ test('a database from a future schema version is refused, never reset', () => {
   unchanged.close();
   assert.equal(version, 99);
 });
+
+test('replaying a transaction creation under a new command id is a no-op', async () => {
+  // The device creates a transaction from the SMS under its own command id.
+  // The server later replays that same creation under a DIFFERENT op id, so
+  // processed_commands cannot recognise the repeat. Before this was handled the
+  // INSERT hit transactions.id (SQLITE_CONSTRAINT_PRIMARYKEY) and took the whole
+  // pulled batch with it — sync stopped, and the app reported "Backup paused".
+  const {coordinator} = freshCoordinator('replay-transaction');
+  const transactionId = randomUUID();
+  await createTransaction(coordinator, {id: transactionId, amountMinor: 25_000});
+
+  const category = await createCategory(coordinator, 'Groceries');
+  await coordinator.execute({
+    commandId: randomUUID(),
+    kind: 'assignCategory',
+    expectedRevision: 1,
+    payload: {transactionId, categoryId: category, source: 'manual'},
+  });
+
+  // The replay: same transaction, brand-new command id.
+  await createTransaction(coordinator, {id: transactionId, amountMinor: 25_000});
+
+  const rows = await coordinator.query(
+    'SELECT COUNT(*) AS n FROM transactions WHERE id = ?',
+    [transactionId],
+  );
+  assert.equal(Number(rows[0].n), 1, 'the replay must not create a second row');
+
+  // And it must not undo a categorisation the user made by hand.
+  const allocations = await coordinator.query(
+    'SELECT category_id, source FROM transaction_allocations WHERE transaction_id = ?',
+    [transactionId],
+  );
+  assert.equal(allocations.length, 1);
+  assert.equal(allocations[0].category_id, category);
+  assert.equal(allocations[0].source, 'manual');
+});

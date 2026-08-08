@@ -389,6 +389,19 @@ class NodeDatabaseCoordinator implements DatabaseCoordinator {
     const { alert, transaction } = command.payload;
     const now = Date.now();
 
+    // Already here? The device creates a transaction from the SMS under its own
+    // command id, and the server later replays that creation under a different
+    // op id — processed_commands cannot see the repeat, so the INSERT hits
+    // transactions.id and one collision aborts the whole pulled batch.
+    //
+    // A full no-op on purpose: the allocation exists too, and re-running the
+    // classifier could overwrite a category the user has since set by hand.
+    const existing = this.#get<{ revision: number }>(
+      "SELECT revision FROM transactions WHERE id = ?",
+      [transaction.id],
+    );
+    if (existing) return applied(command, transaction.id, existing.revision);
+
     this.#run(
       `INSERT INTO transactions (
          id, occurred_at, received_at, accounting_month_key, amount_minor,
