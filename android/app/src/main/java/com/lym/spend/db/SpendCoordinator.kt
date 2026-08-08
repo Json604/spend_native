@@ -695,7 +695,7 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     val statements = SqlScript.statements(sql)
     require(statements.size == 1) { "query() accepts exactly one read-only SQL statement" }
     val statement = statements.single()
-    if (statement.matches(Regex("(?is)^SELECT\\b.*"))) return statement
+    if (NativeReadOnlySql.isRead(statement)) return statement
 
     val pragma = Regex("(?is)^PRAGMA\\s+([a-z_]+)(?:\\s*\\([^)]*\\))?\\s*$").matchEntire(statement)
     val readOnlyPragmas = setOf(

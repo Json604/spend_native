@@ -9,7 +9,7 @@ import {
   View,
 } from "react-native";
 import SpendSurface from "./SpendSurface";
-import type { SpendDailyBucket } from "../store/selectors";
+import type { SpendDailyBucket } from "../types/types";
 
 type SpendDailyBarsCardProps = {
   buckets: SpendDailyBucket[];

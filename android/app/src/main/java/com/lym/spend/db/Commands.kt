@@ -286,6 +286,81 @@ sealed class Command(open val commandId: String, val kind: String) {
     }
     return json
   }
+
+  companion object {
+    /** Parses the JSON wire format shared with the TypeScript command types. */
+    internal fun fromJsonString(value: String): Command {
+      val json = JSONObject(value)
+      val commandId = json.getString("commandId")
+      val expectedRevision = { json.getInt("expectedRevision") }
+      val payload = json.getJSONObject("payload")
+
+      return when (json.getString("kind")) {
+        CreateTransactionFromAlert.KIND -> CreateTransactionFromAlert(
+          commandId,
+          createTransactionFromAlertPayloadFromJson(payload),
+        )
+        RecordSourceAlert.KIND -> RecordSourceAlert(commandId, newAlertPayloadFromJson(payload))
+        UpdateAlertParseStatus.KIND -> UpdateAlertParseStatus(
+          commandId,
+          updateAlertParseStatusPayloadFromJson(payload),
+        )
+        AssignCategory.KIND -> AssignCategory(
+          commandId,
+          expectedRevision(),
+          assignCategoryPayloadFromJson(payload),
+        )
+        AcceptSuggestion.KIND -> AcceptSuggestion(
+          commandId,
+          expectedRevision(),
+          acceptSuggestionPayloadFromJson(payload),
+        )
+        SetBudgetAmount.KIND -> SetBudgetAmount(
+          commandId,
+          expectedRevision(),
+          setBudgetAmountPayloadFromJson(payload),
+        )
+        ClearMonthBudget.KIND -> ClearMonthBudget(
+          commandId,
+          expectedRevision(),
+          clearMonthBudgetPayloadFromJson(payload),
+        )
+        CreateCategory.KIND -> CreateCategory(commandId, createCategoryPayloadFromJson(payload))
+        RenameCategory.KIND -> RenameCategory(
+          commandId,
+          expectedRevision(),
+          renameCategoryPayloadFromJson(payload),
+        )
+        ArchiveCategory.KIND -> ArchiveCategory(
+          commandId,
+          expectedRevision(),
+          archiveCategoryPayloadFromJson(payload),
+        )
+        IgnoreTransaction.KIND -> IgnoreTransaction(
+          commandId,
+          expectedRevision(),
+          ignoreTransactionPayloadFromJson(payload),
+        )
+        SetPlanType.KIND -> SetPlanType(
+          commandId,
+          expectedRevision(),
+          setPlanTypePayloadFromJson(payload),
+        )
+        LinkRefund.KIND -> LinkRefund(
+          commandId,
+          expectedRevision(),
+          linkRefundPayloadFromJson(payload),
+        )
+        RecordSuggestion.KIND -> RecordSuggestion(commandId, recordSuggestionPayloadFromJson(payload))
+        ResolvePossibleMatch.KIND -> ResolvePossibleMatch(
+          commandId,
+          expectedRevision(),
+          resolvePossibleMatchPayloadFromJson(payload),
+        )
+        else -> error("Unknown command kind: ${json.getString("kind")}")
+      }
+    }
+  }
 }
 
 sealed class CommandResult {
@@ -347,6 +422,149 @@ private fun JSONObject.putOptional(name: String, value: Any?): JSONObject {
   if (value != null) put(name, value)
   return this
 }
+
+private fun JSONObject.optionalString(name: String): String? =
+  if (!has(name) || isNull(name)) null else getString(name)
+
+private fun JSONObject.optionalInt(name: String): Int? =
+  if (!has(name) || isNull(name)) null else getInt(name)
+
+private fun JSONObject.optionalDouble(name: String): Double? =
+  if (!has(name) || isNull(name)) null else getDouble(name)
+
+private fun transactionDirection(value: String) =
+  TransactionDirection.entries.firstOrNull { it.wireValue == value }
+    ?: error("Unknown transaction direction: $value")
+
+private fun transactionStatus(value: String) =
+  TransactionStatus.entries.firstOrNull { it.wireValue == value }
+    ?: error("Unknown transaction status: $value")
+
+private fun planType(value: String) =
+  PlanType.entries.firstOrNull { it.wireValue == value }
+    ?: error("Unknown plan type: $value")
+
+private fun allocationSource(value: String) =
+  AllocationSource.entries.firstOrNull { it.wireValue == value }
+    ?: error("Unknown allocation source: $value")
+
+private fun possibleMatchResolution(value: String) =
+  PossibleMatchResolution.entries.firstOrNull { it.wireValue == value }
+    ?: error("Unknown possible-match resolution: $value")
+
+private fun newTransactionPayloadFromJson(json: JSONObject) = NewTransactionPayload(
+  id = json.getString("id"),
+  occurredAt = json.getLong("occurredAt"),
+  receivedAt = json.getLong("receivedAt"),
+  accountingMonthKey = json.getString("accountingMonthKey"),
+  amountMinor = json.getLong("amountMinor"),
+  direction = transactionDirection(json.getString("direction")),
+  currencyCode = json.optString("currencyCode", "INR"),
+  merchantRaw = json.optionalString("merchantRaw"),
+  counterpartyKey = json.optionalString("counterpartyKey"),
+  channel = json.optionalString("channel"),
+  status = transactionStatus(json.optString("status", TransactionStatus.POSTED.wireValue)),
+  planType = planType(json.optString("planType", PlanType.PLANNED.wireValue)),
+)
+
+private fun newAlertPayloadFromJson(json: JSONObject) = NewAlertPayload(
+  id = json.getString("id"),
+  rawSender = json.optionalString("rawSender"),
+  rawBody = json.optionalString("rawBody"),
+  receivedAt = json.getLong("receivedAt"),
+  providerMessageId = json.optionalString("providerMessageId"),
+  subscriptionId = json.optionalInt("subscriptionId"),
+  bankReference = json.optionalString("bankReference"),
+  parseStatus = json.optString("parseStatus", "parsed"),
+)
+
+private fun initialAllocationPayloadFromJson(json: JSONObject) = InitialAllocationPayload(
+  id = json.optionalString("id"),
+  categoryId = json.optionalString("categoryId"),
+  source = allocationSource(json.getString("source")),
+  confidence = json.optionalDouble("confidence"),
+)
+
+private fun createTransactionFromAlertPayloadFromJson(json: JSONObject) =
+  CreateTransactionFromAlertPayload(
+    alert = newAlertPayloadFromJson(json.getJSONObject("alert")),
+    transaction = newTransactionPayloadFromJson(json.getJSONObject("transaction")),
+    allocation = if (json.has("allocation") && !json.isNull("allocation")) {
+      initialAllocationPayloadFromJson(json.getJSONObject("allocation"))
+    } else {
+      null
+    },
+  )
+
+private fun updateAlertParseStatusPayloadFromJson(json: JSONObject) =
+  UpdateAlertParseStatusPayload(json.getString("alertId"), json.getString("parseStatus"))
+
+private fun assignCategoryPayloadFromJson(json: JSONObject) = AssignCategoryPayload(
+  transactionId = json.getString("transactionId"),
+  categoryId = json.getString("categoryId"),
+  source = allocationSource(json.getString("source")),
+  confidence = json.optionalDouble("confidence"),
+  allocationId = json.optionalString("allocationId"),
+)
+
+private fun acceptSuggestionPayloadFromJson(json: JSONObject) = AcceptSuggestionPayload(
+  transactionId = json.getString("transactionId"),
+  suggestionId = json.getString("suggestionId"),
+  allocationId = json.optionalString("allocationId"),
+)
+
+private fun setBudgetAmountPayloadFromJson(json: JSONObject) = SetBudgetAmountPayload(
+  monthKey = json.getString("monthKey"),
+  categoryId = json.getString("categoryId"),
+  amountMinor = json.getLong("amountMinor"),
+  recurring = json.optBoolean("recurring", false),
+)
+
+private fun clearMonthBudgetPayloadFromJson(json: JSONObject) =
+  ClearMonthBudgetPayload(json.getString("monthKey"))
+
+private fun createCategoryPayloadFromJson(json: JSONObject) = CreateCategoryPayload(
+  categoryId = json.getString("categoryId"),
+  label = json.getString("label"),
+  tint = json.optionalString("tint"),
+  parentId = json.optionalString("parentId"),
+  isSystem = json.optBoolean("isSystem", false),
+  catalogVersion = json.optInt("catalogVersion", 1),
+)
+
+private fun renameCategoryPayloadFromJson(json: JSONObject) =
+  RenameCategoryPayload(json.getString("categoryId"), json.getString("label"))
+
+private fun archiveCategoryPayloadFromJson(json: JSONObject) =
+  ArchiveCategoryPayload(json.getString("categoryId"))
+
+private fun ignoreTransactionPayloadFromJson(json: JSONObject) =
+  IgnoreTransactionPayload(json.getString("transactionId"))
+
+private fun setPlanTypePayloadFromJson(json: JSONObject) = SetPlanTypePayload(
+  transactionId = json.getString("transactionId"),
+  planType = planType(json.getString("planType")),
+)
+
+private fun linkRefundPayloadFromJson(json: JSONObject) = LinkRefundPayload(
+  refundTransactionId = json.getString("refundTransactionId"),
+  originalTransactionId = json.getString("originalTransactionId"),
+)
+
+private fun recordSuggestionPayloadFromJson(json: JSONObject) = RecordSuggestionPayload(
+  suggestionId = json.getString("suggestionId"),
+  transactionId = json.getString("transactionId"),
+  categoryId = json.getString("categoryId"),
+  confidence = json.getDouble("confidence"),
+  tier = json.getString("tier"),
+  catalogVersion = json.getInt("catalogVersion"),
+  transactionRevision = json.getInt("transactionRevision"),
+)
+
+private fun resolvePossibleMatchPayloadFromJson(json: JSONObject) = ResolvePossibleMatchPayload(
+  possibleMatchId = json.getString("possibleMatchId"),
+  resolution = possibleMatchResolution(json.getString("resolution")),
+)
 
 private fun NewTransactionPayload.toJson() = JSONObject()
   .put("id", id)

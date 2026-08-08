@@ -14,7 +14,7 @@ import {
 import { useNavigation } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useSpend } from "../store/SpendProvider";
-import { monthKeyFromDate } from "../store/budgetStorage";
+import { spendMonthLabel } from "../store/sqliteRepository";
 import type { CategoryBudgetMap, SpendCategoryId } from "../types/types";
 
 const formatRupees = (minor: number): string => {
@@ -26,11 +26,10 @@ const formatRupees = (minor: number): string => {
 export default function BudgetPlanner() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
-  const { actions, currentMonthBudget, categoryOptions } = useSpend();
+  const { actions, currentMonthBudget, categoryOptions, selectedMonth } = useSpend();
 
-  const now = new Date();
-  const monthKey = monthKeyFromDate(now);
-  const monthName = now.toLocaleString(undefined, { month: "long" });
+  const monthKey = selectedMonth;
+  const monthName = spendMonthLabel(selectedMonth);
 
   // Initial form state seeded from existing budget if any (rupees as text per row)
   const [rows, setRows] = useState<Record<string, string>>(() => {
@@ -153,7 +152,7 @@ export default function BudgetPlanner() {
           onPress: async () => {
             setSavingEdit(true);
             try {
-              await actions.deleteCategory(editingCategoryId);
+              await actions.archiveCategory(editingCategoryId);
               setExtraRows((prev) => prev.filter((r) => r.id !== editingCategoryId));
               setRows((prev) => {
                 const next = { ...prev };
@@ -257,7 +256,7 @@ export default function BudgetPlanner() {
     if (!trimmed) return;
     setCreatingCategory(true);
     try {
-      const created = await actions.addCategory(
+      const created = await actions.createCategory(
         trimmed,
         newCategoryParentId ? { parentId: newCategoryParentId } : undefined,
       );
@@ -301,9 +300,9 @@ export default function BudgetPlanner() {
     }
     if (Object.keys(map).length === 0) {
       // User zero'd everything → wipe the month entry entirely
-      await actions.clearMonthlyBudget(monthKey);
+      await actions.clearMonthBudget(monthKey);
     } else {
-      await actions.setMonthlyBudget(monthKey, map);
+      await actions.setBudget(monthKey, map);
     }
     navigation.goBack();
   };

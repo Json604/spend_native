@@ -16,7 +16,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import MaterialCommunityIcons from "react-native-vector-icons/MaterialCommunityIcons";
 
 import { useSpend } from "../store/SpendProvider";
-import { selectDailyBuckets } from "../store/selectors";
+import { spendMonthLabel } from "../store/sqliteRepository";
 import SpendTodayHeroCard from "../components/SpendTodayHeroCard";
 import SpendBudgetCard from "../components/SpendBudgetCard";
 import SpendDayTransactionsCard from "../components/SpendDayTransactionsCard";
@@ -36,6 +36,9 @@ export default function SpendMain() {
     reviewPreview,
     widgetSnapshot,
     currentMonthBudget,
+    selectedMonth,
+    getTransactionsForDay,
+    dailyBuckets,
     actions,
   } = useSpend();
 
@@ -55,8 +58,6 @@ export default function SpendMain() {
     [categoryOptions],
   );
 
-  const dailyBuckets = useMemo(() => selectDailyBuckets(domain.state), [domain.state]);
-
   const activeBucket = useMemo(() => {
     if (selectedBucketDate) {
       return dailyBuckets.find((b) => b.date === selectedBucketDate) ?? null;
@@ -64,29 +65,19 @@ export default function SpendMain() {
     return dailyBuckets.find((b) => b.isToday) ?? null;
   }, [dailyBuckets, selectedBucketDate]);
 
-  const dayTransactions = useMemo(() => {
-    if (!activeBucket) return [];
-    const ref = new Date(activeBucket.date);
-    return domain.state.transactions
-      .filter((t) => {
-        if (t.direction !== "debit" || t.status === "ignored") return false;
-        const d = new Date(t.occurredAt);
-        return (
-          d.getFullYear() === ref.getFullYear() &&
-          d.getMonth() === ref.getMonth() &&
-          d.getDate() === ref.getDate()
-        );
-      })
-      .sort(
-        (a, b) =>
-          new Date(b.occurredAt).getTime() - new Date(a.occurredAt).getTime(),
-      );
-  }, [domain.state, activeBucket]);
+  const [dayTransactions, setDayTransactions] = useState<typeof domain.state.transactions>([]);
 
-  const monthName = useMemo(
-    () => new Date().toLocaleString(undefined, { month: "long" }),
-    [],
-  );
+  useEffect(() => {
+    if (!activeBucket) {
+      setDayTransactions([]);
+      return;
+    }
+    getTransactionsForDay(activeBucket.date)
+      .then(setDayTransactions)
+      .catch(() => setDayTransactions([]));
+  }, [activeBucket?.date, getTransactionsForDay, domain.state.transactions.length]);
+
+  const monthName = useMemo(() => spendMonthLabel(selectedMonth), [selectedMonth]);
 
   // Deep-link routing
   useEffect(() => {
@@ -251,7 +242,7 @@ export default function SpendMain() {
             onAssignCategory={(id, label, opts) =>
               actions.assignReviewCategory(id, label, opts)
             }
-            onDeleteTransaction={(id) => actions.deleteTransaction(id)}
+            onDeleteTransaction={(id) => actions.ignoreTransaction(id)}
             onSetPlanType={(id, planType) => actions.setTransactionPlanType(id, planType)}
           />
         </View>

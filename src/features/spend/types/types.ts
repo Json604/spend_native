@@ -204,6 +204,8 @@ export type SpendSeedTransactionInput = Omit<
   | "needsReview"
 > & {
   counterpartyKey?: string;
+  categoryLabel?: string;
+  categoryParentId?: SpendCategoryId;
 };
 
 export type LearnedCategoryRuleInput = {
@@ -220,35 +222,55 @@ export type SpendRepositorySnapshot = {
   recentTransactions: SpendTransaction[];
 };
 
-export type SpendRepository = {
-  getState: () => SpendDomainState;
-  getSnapshot: (referenceDate?: Date) => SpendRepositorySnapshot;
-  upsertTransactions: (transactions: SpendSeedTransactionInput[]) => SpendDomainState;
-  ensureCategory: (
-    label: string,
-    opts?: { parentId?: SpendCategoryId },
-  ) => SpendCategoryDefinition;
-  saveLearnedCategoryRule: (input: LearnedCategoryRuleInput) => LearnedCategoryRule;
-  assignCategoryToTransaction: (
-    transactionId: string,
-    categoryId: SpendCategoryId,
-    categoryLabel: string,
-  ) => SpendTransaction | undefined;
-  ignoreTransaction: (transactionId: string) => SpendTransaction | undefined;
-  setTransactionPlanType: (transactionId: string, planType: SpendPlanType) => SpendTransaction | undefined;
-  deleteTransaction: (transactionId: string) => boolean;
-  deleteCategory: (categoryId: SpendCategoryId) => boolean;
-  renameCategory: (categoryId: SpendCategoryId, newLabel: string) => SpendCategoryDefinition | undefined;
-  updateSyncState: (source: SpendSourceKind, patch: Partial<SpendSyncState>) => SpendSyncState | undefined;
+export type SpendDailyBucket = {
+  date: string;
+  dayLabel: string;
+  weekdayLabel: string;
+  fullLabel: string;
+  amountMinor: number;
+  transactionCount: number;
+  isToday: boolean;
 };
 
-export type SpendStorageAdapter = {
-  readState: () => SpendDomainState;
-  writeState: (state: SpendDomainState) => void;
+export type SpendDataRepository = {
+  monthSummary: (monthKey: string) => Promise<{
+    totalSpentMinor: number;
+    budgetTotalMinor: number;
+    daysRemaining: number;
+    transactionCount: number;
+    reviewCount: number;
+  }>;
+  categoryBreakdown: (monthKey: string) => Promise<Array<{
+    categoryId: SpendCategoryId;
+    label: string;
+    tint: string;
+    parentId?: SpendCategoryId;
+    spentMinor: number;
+    budgetedMinor: number;
+    recurring: boolean;
+  }>>;
+  dailyBuckets: (monthKey: string) => Promise<SpendDailyBucket[]>;
+  transactionsForDay: (dateKey: string) => Promise<SpendTransaction[]>;
+  budgetsForMonth: (monthKey: string) => Promise<MonthlyBudget | null>;
+  needsReview: (monthKey: string) => Promise<SpendTransaction[]>;
+  transactionsForMonth: (monthKey: string) => Promise<SpendTransaction[]>;
+  categories: (monthKey: string) => Promise<SpendCategoryDefinition[]>;
+  getTransactionsForDay: (dateKey: string) => Promise<SpendTransaction[]>;
+  createTransaction: (input: SpendSeedTransactionInput) => Promise<void>;
+  assignCategory: (transactionId: string, categoryId: SpendCategoryId) => Promise<void>;
+  ignoreTransaction: (transactionId: string) => Promise<void>;
+  setPlanType: (transactionId: string, planType: SpendPlanType) => Promise<void>;
+  setBudgetAmount: (monthKey: string, categoryId: SpendCategoryId, amountMinor: number, recurring?: boolean) => Promise<void>;
+  clearMonthBudget: (monthKey: string) => Promise<void>;
+  createCategory: (label: string, opts?: { parentId?: SpendCategoryId }) => Promise<SpendCategoryDefinition>;
+  renameCategory: (categoryId: SpendCategoryId, newLabel: string) => Promise<void>;
+  archiveCategory: (categoryId: SpendCategoryId) => Promise<void>;
+  setBudget: (monthKey: string, categoryBudgets: CategoryBudgetMap) => Promise<void>;
+  ensureSystemCategories: () => Promise<void>;
 };
 
 export type SpendContextType = {
-  repository: SpendRepository;
+  repository: SpendDataRepository;
   domain: SpendRepositorySnapshot;
   summary: SpendSummary;
   categories: SpendCategoryPreview[];
@@ -259,6 +281,10 @@ export type SpendContextType = {
   recentPreview: SpendRecentPreview[];
   widgetSnapshot: SpendWidgetSnapshot;
   currentMonthBudget: MonthlyBudget | null;
+  selectedMonth: string;
+  setSelectedMonth: (monthKey: string) => void;
+  dailyBuckets: SpendDailyBucket[];
+  getTransactionsForDay: (dateKey: string) => Promise<SpendTransaction[]>;
   actions: {
     grantSmsAccess: () => Promise<void>;
     refreshSmsInbox: () => Promise<void>;
@@ -269,6 +295,7 @@ export type SpendContextType = {
       categoryLabel: string,
       opts?: { parentId?: SpendCategoryId },
     ) => Promise<void>;
+    assignCategory: (transactionId: string, categoryId: SpendCategoryId) => Promise<void>;
     ignoreTransaction: (transactionId: string) => Promise<void>;
     addManualTransaction: (input: {
       amountMinor: number;
@@ -280,15 +307,16 @@ export type SpendContextType = {
       planType?: SpendPlanType;
     }) => Promise<void>;
     setTransactionPlanType: (transactionId: string, planType: SpendPlanType) => Promise<void>;
-    deleteTransaction: (transactionId: string) => Promise<void>;
-    setMonthlyBudget: (monthKey: string, categoryBudgets: CategoryBudgetMap) => Promise<void>;
-    clearMonthlyBudget: (monthKey: string) => Promise<void>;
-    addCategory: (
+    setPlanType: (transactionId: string, planType: SpendPlanType) => Promise<void>;
+    setBudgetAmount: (monthKey: string, categoryId: SpendCategoryId, amountMinor: number, recurring?: boolean) => Promise<void>;
+    createCategory: (
       label: string,
       opts?: { parentId?: SpendCategoryId },
     ) => Promise<SpendCategoryOption>;
     renameCategory: (categoryId: SpendCategoryId, newLabel: string) => Promise<void>;
-    deleteCategory: (categoryId: SpendCategoryId) => Promise<void>;
+    archiveCategory: (categoryId: SpendCategoryId) => Promise<void>;
+    setBudget: (monthKey: string, categoryBudgets: CategoryBudgetMap) => Promise<void>;
+    clearMonthBudget: (monthKey: string) => Promise<void>;
   };
 };
 
@@ -299,6 +327,7 @@ export type MonthlyBudget = {
   monthKey: string;             // "YYYY-MM"
   amountMinor: number;          // derived total — sum of categoryBudgets
   categoryBudgets: CategoryBudgetMap;
+  categoryRecurring?: Record<string, boolean>;
   setAt: string;                // ISO
 };
 
