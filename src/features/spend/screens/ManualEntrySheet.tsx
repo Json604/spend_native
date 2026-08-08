@@ -198,9 +198,9 @@ export default function ManualEntrySheet() {
         />
 
         <Text style={styles.label}>Category (optional)</Text>
-        {categoryOptions.length > 0 ? (
+        {monthOptions.length > 0 ? (
           <View style={styles.chipWrap}>
-            {categoryOptions.map((opt) => {
+            {monthOptions.map((opt) => {
               const active = selectedCategoryLabel === opt.label && !trimmedCustom;
               return (
                 <Pressable

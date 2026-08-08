@@ -1,4 +1,4 @@
-import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
 import SpendSurface from "./SpendSurface";
 import { SpendCategoryPreview } from "../types/types";
 import { spendCurrency } from "../store/sqliteRepository";
@@ -23,16 +23,7 @@ export default function SpendCategoryCard({ categories }: SpendCategoryCardProps
         </View>
       ) : null}
 
-      {/* A long category list used to stretch the card down the page, pushing
-          everything below it out of reach. Capping the height and scrolling in
-          place keeps the page a fixed, scannable shape — the same treatment
-          the needs-review card already uses. */}
-      <ScrollView
-        style={styles.scrollWrap}
-        contentContainerStyle={styles.list}
-        nestedScrollEnabled
-        showsVerticalScrollIndicator={false}
-      >
+      <View style={styles.list}>
 
         {categories.map((category, idx) => {
           const hasBudget = !!category.budgetMinor && category.budgetMinor > 0;
@@ -77,7 +68,7 @@ export default function SpendCategoryCard({ categories }: SpendCategoryCardProps
             </View>
           );
         })}
-      </ScrollView>
+      </View>
     </SpendSurface>
   );
 }
@@ -101,11 +92,6 @@ const styles = StyleSheet.create({
   list: {
     paddingTop: 18,
     gap: 14,
-  },
-  scrollWrap: {
-    // Roughly six rows: enough to read the shape of the month without the card
-    // taking over the screen.
-    maxHeight: 340,
   },
   row: {
     gap: 8,

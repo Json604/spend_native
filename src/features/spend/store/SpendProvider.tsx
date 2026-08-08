@@ -122,6 +122,11 @@ function buildLoadedData(
     .sort((left, right) => left.label.localeCompare(right.label));
   const categoriesPreview = breakdown
     .filter((row) => row.categoryId !== "uncategorized" && row.categoryId !== "needs-review")
+    // This month's categories, matching the planner: a category belongs to a
+    // month when it has a budget there. Spending still shows regardless — a
+    // spend against an unbudgeted category is exactly what you need to see,
+    // not something to hide for consistency's sake.
+    .filter((row) => row.budgetedMinor > 0 || row.spentMinor > 0)
     .map((row) => ({
       id: row.categoryId,
       label: row.label,
