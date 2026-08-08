@@ -25,6 +25,7 @@ import {
   spendMonthLabel,
 } from "../store/sqliteRepository";
 import type { SpendCategoryId, SpendCategoryOption } from "../types/types";
+import { parseBudgetPaste } from "../utils/parseBudgetPaste";
 
 const formatRupees = (minor: number): string => {
   const amount = minor / 100;
@@ -85,6 +86,9 @@ export default function BudgetPlanner() {
   const [undoing, setUndoing] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [addModalVisible, setAddModalVisible] = useState(false);
+  const [pasteVisible, setPasteVisible] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  const [pasteBusy, setPasteBusy] = useState(false);
   const [newCategoryLabel, setNewCategoryLabel] = useState("");
   const [newCategoryParentId, setNewCategoryParentId] = useState<SpendCategoryId | null>(null);
   const [newCategoryAmount, setNewCategoryAmount] = useState("");
@@ -169,6 +173,39 @@ export default function BudgetPlanner() {
       .sort((left, right) => left.label.localeCompare(right.label)),
     [plannerOptions],
   );
+
+  const pasteResult = useMemo(() => parseBudgetPaste(pasteText), [pasteText]);
+
+  /**
+   * Apply a pasted budget in one pass. Existing categories are matched by name
+   * (case-insensitively) so a paste updates them rather than creating twins;
+   * anything new is created first, then given its amount.
+   */
+  const applyPaste = async () => {
+    if (pasteBusy || pasteResult.entries.length === 0) return;
+    setPasteBusy(true);
+    const byLabel = new Map(plannerOptions.map((option) => [option.label.toLowerCase(), option.id]));
+    let applied = 0;
+    try {
+      for (const entry of pasteResult.entries) {
+        let categoryId = byLabel.get(entry.label.toLowerCase());
+        if (!categoryId) {
+          const created = await actions.createCategory(entry.label);
+          categoryId = created.id;
+          byLabel.set(entry.label.toLowerCase(), categoryId);
+        }
+        await actions.setBudgetAmount(monthKey, categoryId, entry.amountMinor, false);
+        applied += 1;
+      }
+      setPasteVisible(false);
+      setPasteText("");
+      setNotice(`Added ${applied} ${applied === 1 ? "category" : "categories"} to ${monthLabel}.`);
+    } catch (error) {
+      Alert.alert("Couldn't apply the list", error instanceof Error ? error.message : "Try again.");
+    } finally {
+      setPasteBusy(false);
+    }
+  };
 
   const metric = (option: PlannerOption, key: "amount" | "percent") =>
     key === "percent"
@@ -496,7 +533,15 @@ export default function BudgetPlanner() {
             ? <BudgetPlannerSkeleton />
             : <Text style={styles.emptyText}>No categories yet. Add one to start budgeting.</Text>
         }
-        ListFooterComponent={<Pressable onPress={() => setAddModalVisible(true)} style={styles.addRow}><Text style={styles.addPlus}>+</Text><Text style={styles.addText}>Add category</Text></Pressable>}
+        ListFooterComponent={readOnly ? null : (
+          <View>
+            <Pressable onPress={() => setAddModalVisible(true)} style={styles.addRow}><Text style={styles.addPlus}>+</Text><Text style={styles.addText}>Add category</Text></Pressable>
+            <Pressable onPress={() => setPasteVisible(true)} style={styles.addRow}>
+              <MaterialCommunityIcons name="clipboard-text-outline" size={18} color="#FFD27A" />
+              <Text style={[styles.addText, { marginLeft: 8 }]}>Paste a list</Text>
+            </Pressable>
+          </View>
+        )}
         contentContainerStyle={styles.listContent}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
@@ -580,6 +625,66 @@ export default function BudgetPlanner() {
       </Modal>
 
       <Modal
+        animationType="slide"
+        transparent
+        visible={pasteVisible}
+        onRequestClose={() => { if (!pasteBusy) setPasteVisible(false); }}
+      >
+        <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={styles.modalBackdrop}>
+          <Pressable style={StyleSheet.absoluteFillObject} onPress={() => { if (!pasteBusy) setPasteVisible(false); }} />
+          <View style={styles.editSheet}>
+            <View style={styles.sheetGrip} />
+            <Text style={styles.modalKicker}>Paste a list</Text>
+            <Text style={styles.helper}>
+              One category per line, amount at the end. "Rent 15000", "Groceries: 8,000" and "Spotify ₹69" all work.
+            </Text>
+
+            <TextInput
+              value={pasteText}
+              onChangeText={setPasteText}
+              placeholder={"Rent 15000\nGroceries 8000\nSpotify 69"}
+              placeholderTextColor="#665B43"
+              multiline
+              textAlignVertical="top"
+              style={[styles.modalInput, { height: 130, paddingTop: 12 }]}
+            />
+
+            {pasteText.trim() !== "" ? (
+              <ScrollView style={{ maxHeight: 180 }} contentContainerStyle={{ paddingVertical: 4 }} nestedScrollEnabled>
+                {pasteResult.entries.map((entry) => (
+                  <View key={`${entry.label}:${entry.amountMinor}`} style={styles.pastePreviewRow}>
+                    <Text style={styles.pastePreviewLabel} numberOfLines={1}>{entry.label}</Text>
+                    <Text style={styles.pastePreviewAmount}>{spendCurrency(entry.amountMinor)}</Text>
+                  </View>
+                ))}
+                {pasteResult.skipped.map((line, index) => (
+                  <View key={`skipped:${index}`} style={styles.pastePreviewRow}>
+                    <Text style={styles.pasteSkippedLabel} numberOfLines={1}>{line}</Text>
+                    <Text style={styles.pasteSkippedTag}>skipped</Text>
+                  </View>
+                ))}
+              </ScrollView>
+            ) : null}
+
+            <View style={styles.modalActions}>
+              <Pressable onPress={() => { if (!pasteBusy) { setPasteVisible(false); setPasteText(""); } }} style={styles.modalButton}>
+                <Text style={styles.modalButtonText}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                onPress={applyPaste}
+                disabled={pasteBusy || pasteResult.entries.length === 0}
+                style={[styles.modalButton, styles.modalButtonPrimary, (pasteBusy || pasteResult.entries.length === 0) && { opacity: 0.5 }]}
+              >
+                <Text style={styles.modalButtonPrimaryText}>
+                  {pasteBusy ? "Adding..." : pasteResult.entries.length > 0 ? `Add ${pasteResult.entries.length}` : "Add"}
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal
         animationType="fade"
         transparent
         visible={addModalVisible}
@@ -658,6 +763,11 @@ const styles = StyleSheet.create({
   removeRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 22, paddingVertical: 6 },
   removeText: { color: "#FFB74D", fontSize: 14, fontWeight: "500" },
   removeHint: { color: "rgba(255,255,255,0.45)", fontSize: 12, marginTop: 2 },
+  pastePreviewRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 8, gap: 12 },
+  pastePreviewLabel: { color: "white", fontSize: 14, flex: 1 },
+  pastePreviewAmount: { color: "#FFD27A", fontSize: 14, fontWeight: "600" },
+  pasteSkippedLabel: { color: "rgba(255,255,255,0.35)", fontSize: 13, flex: 1, textDecorationLine: "line-through" },
+  pasteSkippedTag: { color: "rgba(255,255,255,0.35)", fontSize: 11 },
   recurringToggleLabel: { color: "#D8CDB0", fontSize: 15, fontWeight: "600" },
   recurringToggleHint: { color: "#6D6048", fontSize: 12, marginTop: 2 },
   modalAmountRow: {

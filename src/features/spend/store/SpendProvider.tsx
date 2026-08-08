@@ -269,8 +269,18 @@ export function SpendProvider({ children }: { children: ReactNode }) {
     reload(selectedMonth).catch((error) => console.warn("Spend reload failed", error));
   }, [syncStates, loading, selectedMonth]); // sync status is provider-local but should be visible in the domain snapshot
 
+  /**
+   * The write is done by the time this is called — the coordinator has already
+   * committed it. What follows is a re-read of the whole month: eight queries
+   * plus the month list, rebuilt into a snapshot. Awaiting that before letting
+   * the UI respond made every save and delete sit under a spinner for about a
+   * second, for work the user is not waiting on.
+   *
+   * So the reload runs, but nobody blocks on it. Screens pick the new data up
+   * through `dataRevision` a beat later, which is what that counter is for.
+   */
   const refreshAfterWrite = useCallback(async () => {
-    await reload(selectedMonth);
+    void reload(selectedMonth).catch((error) => console.warn("Spend reload failed", error));
     syncEngine.nudge();
   }, [reload, selectedMonth]);
 
