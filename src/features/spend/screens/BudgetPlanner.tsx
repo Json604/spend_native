@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
+  FlatList,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -14,711 +15,549 @@ import {
 import { useNavigation } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useSpend } from "../store/SpendProvider";
-import { spendMonthLabel } from "../store/sqliteRepository";
-import type { CategoryBudgetMap, SpendCategoryId } from "../types/types";
+import SpendMonthPager from "../components/SpendMonthPager";
+import {
+  accountingMonthKey,
+  previousAccountingMonthKey,
+  spendCurrency,
+  spendMonthLabel,
+} from "../store/sqliteRepository";
+import type { SpendCategoryId, SpendCategoryOption } from "../types/types";
 
 const formatRupees = (minor: number): string => {
   const amount = minor / 100;
-  const whole = Number.isInteger(amount);
-  return whole ? amount.toFixed(0) : amount.toFixed(2);
+  return Number.isInteger(amount) ? amount.toFixed(0) : amount.toFixed(2);
 };
+
+const parseAmount = (value: string): number | null => {
+  const trimmed = value.replace(/,/g, "").trim();
+  if (!/^\d+(?:\.\d{1,2})?$/.test(trimmed)) return null;
+  const amount = Number(trimmed);
+  return Number.isFinite(amount) ? Math.round(amount * 100) : null;
+};
+
+const monthChoicesFor = (monthKey: string): string[] => {
+  const result = [monthKey];
+  let cursor = monthKey;
+  for (let index = 0; index < 2; index += 1) {
+    cursor = previousAccountingMonthKey(cursor);
+    result.unshift(cursor);
+  }
+  cursor = monthKey;
+  for (let index = 0; index < 2; index += 1) {
+    const [year, month] = cursor.split("-").map(Number);
+    const next = new Date(Date.UTC(year, month, 1));
+    cursor = `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, "0")}`;
+    result.push(cursor);
+  }
+  return result;
+};
+
+type SortMode = "amount" | "name" | "percent";
+type PlannerOption = SpendCategoryOption & {
+  spentMinor: number;
+  deltaMinor: number;
+  budgetMinor: number;
+  recurring: boolean;
+};
+type PlannerGroup = {
+  root: PlannerOption;
+  children: PlannerOption[];
+};
+type ListItem =
+  | { type: "section"; id: string; label: string }
+  | { type: "group"; id: string; group: PlannerGroup; section: "recurring" | "oneoff" }
+  | { type: "child"; id: string; option: PlannerOption };
 
 export default function BudgetPlanner() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
-  const { actions, currentMonthBudget, categoryOptions, selectedMonth } = useSpend();
-
+  const {
+    actions,
+    currentMonthBudget,
+    categoryOptions,
+    categories,
+    selectedMonth,
+    setSelectedMonth,
+  } = useSpend();
   const monthKey = selectedMonth;
-  const monthName = spendMonthLabel(selectedMonth);
+  const currentMonth = accountingMonthKey();
+  const readOnly = monthKey < currentMonth;
 
-  // Initial form state seeded from existing budget if any (rupees as text per row)
-  const [rows, setRows] = useState<Record<string, string>>(() => {
-    const existing = currentMonthBudget?.categoryBudgets ?? {};
-    const seeded: Record<string, string> = {};
-    for (const opt of categoryOptions) {
-      const minor = existing[opt.id];
-      seeded[opt.id] = minor && minor > 0 ? formatRupees(minor) : "";
-    }
-    return seeded;
-  });
-
-  const [extraRows, setExtraRows] = useState<{ id: string; label: string; tint: string }[]>(() => {
-    // Show any saved budget keys that aren't in current categoryOptions
-    const knownIds = new Set(categoryOptions.map((o) => o.id as string));
-    const existing = currentMonthBudget?.categoryBudgets ?? {};
-    return Object.keys(existing)
-      .filter((id) => !knownIds.has(id))
-      .map((id) => ({ id, label: id, tint: "#9C8B5C" }));
-  });
-
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [sortMode, setSortMode] = useState<SortMode>("amount");
+  const [search, setSearch] = useState("");
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [focusedIds, setFocusedIds] = useState<Record<string, boolean>>({});
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [undo, setUndo] = useState<{
+    categoryId: SpendCategoryId;
+    label: string;
+    amountMinor: number;
+    recurring: boolean;
+    revision: number;
+  } | null>(null);
+  const [undoing, setUndoing] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const [addModalVisible, setAddModalVisible] = useState(false);
   const [newCategoryLabel, setNewCategoryLabel] = useState("");
   const [newCategoryParentId, setNewCategoryParentId] = useState<SpendCategoryId | null>(null);
   const [creatingCategory, setCreatingCategory] = useState(false);
+  const [carryForwardBusy, setCarryForwardBusy] = useState(false);
   const addInputRef = useRef<TextInput>(null);
-  const editNameInputRef = useRef<TextInput>(null);
-  const editAmountInputRef = useRef<TextInput>(null);
+  const timers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const commitChains = useRef<Record<string, Promise<void>>>({});
+  const knownBudget = useRef<Record<string, { amountMinor: number; recurring: boolean }>>({});
 
-  useEffect(() => {
-    if (!addModalVisible) return;
-    const t = setTimeout(() => addInputRef.current?.focus(), 250);
-    return () => clearTimeout(t);
-  }, [addModalVisible]);
-
-  const [editingCategoryId, setEditingCategoryId] = useState<SpendCategoryId | null>(null);
-  const [editFocusTarget, setEditFocusTarget] = useState<"name" | "amount">("name");
-  const [editingLabel, setEditingLabel] = useState("");
-  const [editingAmount, setEditingAmount] = useState("");
-  const [savingEdit, setSavingEdit] = useState(false);
-  const editingCategory = useMemo(
-    () => categoryOptions.find((c) => c.id === editingCategoryId) ?? null,
-    [categoryOptions, editingCategoryId],
+  const categoryPreviewById = useMemo(
+    () => new Map(categories.filter((category) => category.id).map((category) => [category.id as string, category])),
+    [categories],
   );
 
-  const openEditCategory = (
-    id: SpendCategoryId,
-    label: string,
-    focusTarget: "name" | "amount",
-  ) => {
-    setEditFocusTarget(focusTarget);
-    setEditingCategoryId(id);
-    setEditingLabel(label);
-    setEditingAmount(rows[id] ?? "");
-  };
+  const plannerOptions = useMemo<PlannerOption[]>(() => {
+    const existing = currentMonthBudget?.categoryBudgets ?? {};
+    const recurring = currentMonthBudget?.categoryRecurring ?? {};
+    const options = [...categoryOptions];
+    const known = new Set<string>(options.map((option) => option.id));
+    Object.keys(existing).forEach((id) => {
+      if (known.has(id)) return;
+      options.push({ id: id as SpendCategoryId, label: id, tint: "#9C8B5C", isCustom: true });
+    });
+    return options.map((option) => {
+      const preview = categoryPreviewById.get(option.id);
+      const budgetMinor = existing[option.id] ?? 0;
+      knownBudget.current[option.id] = {
+        amountMinor: budgetMinor,
+        recurring: recurring[option.id] ?? false,
+      };
+      return {
+        ...option,
+        spentMinor: preview?.spentMinor ?? 0,
+        deltaMinor: preview?.deltaMinor ?? 0,
+        budgetMinor,
+        recurring: recurring[option.id] ?? false,
+      };
+    });
+  }, [categoryOptions, categories, categoryPreviewById, currentMonthBudget]);
 
   useEffect(() => {
-    if (editingCategoryId === null) return;
-    const t = setTimeout(() => {
-      const input =
-        editFocusTarget === "amount"
-          ? editAmountInputRef.current
-          : editNameInputRef.current;
-      input?.focus();
-    }, 250);
-    return () => clearTimeout(t);
-  }, [editingCategoryId, editFocusTarget]);
+    setDrafts({});
+    setFocusedIds({});
+    setExpanded({});
+    setSearch("");
+  }, [monthKey]);
 
-  const closeEditCategory = () => {
-    if (savingEdit) return;
-    setEditingCategoryId(null);
-    setEditFocusTarget("name");
-    setEditingLabel("");
-    setEditingAmount("");
+  useEffect(() => () => {
+    Object.values(timers.current).forEach(clearTimeout);
+  }, []);
+
+  const groups = useMemo<PlannerGroup[]>(() => {
+    // Parent categories are aggregate-only: their budget is the sum of children,
+    // so a parent allocation can never overlap the child envelope.
+    const childrenByParent = new Map<string, PlannerOption[]>();
+    const roots: PlannerOption[] = [];
+    plannerOptions.forEach((option) => {
+      if (!option.parentId) {
+        roots.push(option);
+        return;
+      }
+      const children = childrenByParent.get(option.parentId) ?? [];
+      children.push(option);
+      childrenByParent.set(option.parentId, children);
+    });
+    return roots.map((root) => ({ root, children: childrenByParent.get(root.id) ?? [] }));
+  }, [plannerOptions]);
+
+  const metric = (option: PlannerOption, key: "amount" | "percent") =>
+    key === "percent"
+      ? option.budgetMinor > 0 ? option.spentMinor / option.budgetMinor : option.spentMinor > 0 ? 1 : 0
+      : option.budgetMinor;
+
+  const groupMetric = (group: PlannerGroup, section: "recurring" | "oneoff", key: "amount" | "percent") => {
+    const members = group.children.length > 0 ? group.children : [group.root];
+    const sectionMembers = members.filter((member) => section === "recurring" ? member.recurring : !member.recurring);
+    return sectionMembers.reduce((sum, member) => sum + metric(member, key), 0);
   };
 
-  const confirmEdit = async () => {
-    if (!editingCategoryId) return;
-    const trimmedLabel = editingLabel.trim();
-    const labelChanged = trimmedLabel && trimmedLabel !== editingCategory?.label;
-    const amountChanged = (rows[editingCategoryId] ?? "") !== editingAmount;
+  const listData = useMemo<ListItem[]>(() => {
+    const query = search.trim().toLowerCase();
+    const items: ListItem[] = [];
+    (["recurring", "oneoff"] as const).forEach((section) => {
+      const sectionGroups = groups
+        .map((group) => {
+          const matchesRoot = !query || group.root.label.toLowerCase().includes(query);
+          const children = group.children.filter((child) => {
+            const inSection = section === "recurring" ? child.recurring : !child.recurring;
+            return inSection && (!query || matchesRoot || child.label.toLowerCase().includes(query));
+          });
+          const rootIsMember = group.children.length === 0 && (section === "recurring" ? group.root.recurring : !group.root.recurring);
+          if (!rootIsMember && children.length === 0) return null;
+          return { group, children, rootIsMember };
+        })
+        .filter((value): value is { group: PlannerGroup; children: PlannerOption[]; rootIsMember: boolean } => value !== null)
+        .sort((left, right) => {
+          if (sortMode === "name") return left.group.root.label.localeCompare(right.group.root.label);
+          return groupMetric(right.group, section, sortMode === "percent" ? "percent" : "amount") - groupMetric(left.group, section, sortMode === "percent" ? "percent" : "amount");
+        });
+      if (sectionGroups.length === 0) return;
+      items.push({ type: "section", id: `section:${section}`, label: section === "recurring" ? "Recurring · carries forward" : "This month only" });
+      sectionGroups.forEach(({ group, children, rootIsMember }) => {
+        const displayedGroup = rootIsMember ? group : { ...group, children };
+        items.push({ type: "group", id: `group:${section}:${group.root.id}`, group: displayedGroup, section });
+        if (expanded[group.root.id] || query) {
+          displayedGroup.children.forEach((option) => items.push({ type: "child", id: `child:${section}:${option.id}`, option }));
+        }
+      });
+    });
+    return items;
+  }, [groups, search, sortMode, expanded]);
 
-    if (!labelChanged && !amountChanged) {
-      closeEditCategory();
-      return;
+  const commitAmount = (option: PlannerOption, rawValue: string, recurring = option.recurring) => {
+    if (readOnly || option.parentId === undefined && groups.some((group) => group.root.id === option.id && group.children.length > 0)) return;
+    const amountMinor = parseAmount(rawValue);
+    if (amountMinor === null) return;
+    const previous = knownBudget.current[option.id] ?? { amountMinor: option.budgetMinor, recurring: option.recurring };
+    if (previous.amountMinor === amountMinor && previous.recurring === recurring) return;
+    knownBudget.current[option.id] = { amountMinor, recurring };
+    const previousPromise = commitChains.current[option.id] ?? Promise.resolve();
+    const nextPromise = previousPromise.catch(() => undefined).then(async () => {
+      try {
+        const result = await actions.setBudgetAmount(monthKey, option.id, amountMinor, recurring);
+        setUndo({
+          categoryId: option.id,
+          label: option.label,
+          amountMinor: previous.amountMinor,
+          recurring: previous.recurring,
+          revision: result.revision,
+        });
+        setNotice(null);
+      } catch (error) {
+        knownBudget.current[option.id] = previous;
+        Alert.alert("Couldn't save budget", error instanceof Error ? error.message : "Try again.");
+      }
+    });
+    commitChains.current[option.id] = nextPromise;
+  };
+
+  const startDraft = (option: PlannerOption) => {
+    if (readOnly || option.parentId === undefined && groups.some((group) => group.root.id === option.id && group.children.length > 0)) return;
+    setFocusedIds((current) => ({ ...current, [option.id]: true }));
+    setDrafts((current) => ({ ...current, [option.id]: formatRupees(knownBudget.current[option.id]?.amountMinor ?? option.budgetMinor) }));
+  };
+
+  const changeDraft = (option: PlannerOption, value: string) => {
+    if (readOnly) return;
+    setDrafts((current) => ({ ...current, [option.id]: value }));
+    if (timers.current[option.id]) clearTimeout(timers.current[option.id]);
+    if (parseAmount(value) === null) return;
+    timers.current[option.id] = setTimeout(() => commitAmount(option, value), 500);
+  };
+
+  const finishDraft = (option: PlannerOption) => {
+    if (timers.current[option.id]) clearTimeout(timers.current[option.id]);
+    const value = drafts[option.id];
+    setFocusedIds((current) => ({ ...current, [option.id]: false }));
+    if (value !== undefined) {
+      commitAmount(option, value);
+      if (parseAmount(value) !== null) setDrafts((current) => ({ ...current, [option.id]: formatRupees(parseAmount(value) ?? 0) }));
+      else setDrafts((current) => { const next = { ...current }; delete next[option.id]; return next; });
     }
+  };
 
-    setSavingEdit(true);
+  const stepAmount = (option: PlannerOption, changeMinor: number) => {
+    if (readOnly) return;
+    const current = knownBudget.current[option.id]?.amountMinor ?? option.budgetMinor;
+    const next = Math.max(0, current + changeMinor);
+    commitAmount(option, formatRupees(next));
+  };
+
+  const undoLastEdit = async () => {
+    if (!undo || undoing || readOnly) return;
+    setUndoing(true);
     try {
-      if (labelChanged) {
-        await actions.renameCategory(editingCategoryId, trimmedLabel);
-      }
-      if (amountChanged) {
-        // Stage the new amount in the inline rows map. It gets persisted to the
-        // budget on Save (top-level), matching how all other rows behave.
-        setRows((prev) => ({ ...prev, [editingCategoryId]: editingAmount }));
-      }
-      closeEditCategory();
-    } catch (err) {
-      Alert.alert(
-        "Couldn't save",
-        err instanceof Error ? err.message : "Try again.",
-      );
+      await actions.setBudgetAmount(monthKey, undo.categoryId, undo.amountMinor, undo.recurring, undo.revision);
+      setUndo(null);
+      setNotice("Edit undone");
+      knownBudget.current[undo.categoryId] = { amountMinor: undo.amountMinor, recurring: undo.recurring };
+    } catch (error) {
+      setNotice(error instanceof Error ? "Undo skipped: this row changed" : "Undo skipped");
     } finally {
-      setSavingEdit(false);
+      setUndoing(false);
     }
   };
 
-  const confirmDelete = () => {
-    if (!editingCategoryId) return;
-    const label = editingCategory?.label ?? "this category";
-    Alert.alert(
-      `Delete "${label}"?`,
-      "Any transactions tagged with this category will become uncategorized. Its budget will also be removed.",
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
-            setSavingEdit(true);
-            try {
-              await actions.archiveCategory(editingCategoryId);
-              setExtraRows((prev) => prev.filter((r) => r.id !== editingCategoryId));
-              setRows((prev) => {
-                const next = { ...prev };
-                delete next[editingCategoryId];
-                return next;
-              });
-              closeEditCategory();
-            } finally {
-              setSavingEdit(false);
-            }
-          },
+  const clearBudget = () => {
+    if (readOnly) return;
+    Alert.alert("Clear this month's budget?", "All category limits for this month will be removed.", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Clear budget",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            await actions.clearMonthBudget(monthKey);
+            setDrafts({});
+            setUndo(null);
+            setNotice("This month's budget was cleared");
+          } catch (error) {
+            Alert.alert("Couldn't clear budget", error instanceof Error ? error.message : "Try again.");
+          }
         },
-      ],
+      },
+    ]);
+  };
+
+  const carryForward = async () => {
+    if (readOnly || carryForwardBusy) return;
+    setCarryForwardBusy(true);
+    try {
+      const copied = await actions.carryForwardBudget(monthKey);
+      setNotice(copied ? `${copied} recurring budget${copied === 1 ? "" : "s"} carried forward` : "Nothing new to carry forward");
+    } catch (error) {
+      Alert.alert("Couldn't carry forward", error instanceof Error ? error.message : "Try again.");
+    } finally {
+      setCarryForwardBusy(false);
+    }
+  };
+
+  const beginRename = (option: PlannerOption) => {
+    if (readOnly) return;
+    setRenamingId(option.id);
+    setRenameDraft(option.label);
+  };
+
+  const finishRename = async (option: PlannerOption) => {
+    const label = renameDraft.trim();
+    setRenamingId(null);
+    if (!label || label === option.label || readOnly) return;
+    try {
+      await actions.renameCategory(option.id, label);
+    } catch (error) {
+      Alert.alert("Couldn't rename category", error instanceof Error ? error.message : "Try again.");
+    }
+  };
+
+  const rowHasChildren = (id: string) => groups.some((group) => group.root.id === id && group.children.length > 0);
+
+  const renderItem = ({ item }: { item: ListItem }) => {
+    if (item.type === "section") return <Text style={styles.sectionTitle}>{item.label}</Text>;
+    if (item.type === "group") {
+      const members = item.group.children.length > 0 ? item.group.children : [item.group.root];
+      const budgetMinor = members.reduce((sum, option) => sum + option.budgetMinor, 0);
+      const spentMinor = members.reduce((sum, option) => sum + option.spentMinor, 0);
+      const pct = budgetMinor > 0 ? spentMinor / budgetMinor : 0;
+      const isAggregate = item.group.children.length > 0;
+      return (
+        <Pressable
+          style={styles.groupRow}
+          onPress={() => isAggregate && setExpanded((current) => ({ ...current, [item.group.root.id]: !current[item.group.root.id] }))}
+          onLongPress={() => beginRename(item.group.root)}
+        >
+          <View style={[styles.dot, { backgroundColor: item.group.root.tint }]} />
+          <View style={styles.groupCopy}>
+            <View style={styles.labelLine}>
+              {renamingId === item.group.root.id ? (
+                <TextInput
+                  value={renameDraft}
+                  onChangeText={setRenameDraft}
+                  onBlur={() => finishRename(item.group.root)}
+                  onSubmitEditing={() => finishRename(item.group.root)}
+                  autoFocus
+                  style={styles.renameGroupInput}
+                />
+              ) : <Text style={styles.groupLabel}>{item.group.root.label}</Text>}
+              {isAggregate ? <Text style={styles.aggregateTag}>ROLL-UP</Text> : null}
+              {isAggregate ? <Text style={styles.chevron}>{expanded[item.group.root.id] ? "⌃" : "⌄"}</Text> : null}
+            </View>
+            <View style={styles.track}><View style={[styles.fill, { width: `${Math.min(pct, 1) * 100}%`, backgroundColor: pct > 1 ? "#FF8E72" : item.group.root.tint }]} /></View>
+            <Text style={styles.meta}>{spendCurrency(spentMinor)} spent {budgetMinor > 0 ? `of ${spendCurrency(budgetMinor)}` : "· no budget"}</Text>
+          </View>
+          <Text style={styles.groupAmount}>{budgetMinor > 0 ? spendCurrency(budgetMinor) : "—"}</Text>
+        </Pressable>
+      );
+    }
+    const option = item.option;
+    const value = focusedIds[option.id] ? drafts[option.id] ?? "" : formatRupees(knownBudget.current[option.id]?.amountMinor ?? option.budgetMinor);
+    const pct = option.budgetMinor > 0 ? option.spentMinor / option.budgetMinor : 0;
+    const delta = option.deltaMinor;
+    return (
+      <View style={styles.childRow}>
+        <View style={[styles.dot, { backgroundColor: option.tint }]} />
+        <View style={styles.childCopy}>
+          {renamingId === option.id ? (
+            <TextInput value={renameDraft} onChangeText={setRenameDraft} onBlur={() => finishRename(option)} onSubmitEditing={() => finishRename(option)} autoFocus style={styles.renameInput} />
+          ) : (
+            <Pressable onPress={() => beginRename(option)}><Text style={styles.childLabel}>{option.label}</Text></Pressable>
+          )}
+          <View style={styles.track}><View style={[styles.fill, { width: `${Math.min(pct, 1) * 100}%`, backgroundColor: pct > 1 ? "#FF8E72" : option.tint }]} /></View>
+          <Text style={styles.meta}>{spendCurrency(option.spentMinor)} spent {option.budgetMinor > 0 ? `· ${spendCurrency(option.budgetMinor)} budget` : "· no budget"}{delta !== 0 ? ` · ${delta > 0 ? "↑" : "↓"} ${spendCurrency(Math.abs(delta))} vs last month` : ""}</Text>
+        </View>
+        <View style={styles.amountEditor}>
+          <Pressable onPress={() => stepAmount(option, -100)} disabled={readOnly} style={styles.stepper}><Text style={styles.stepperText}>−</Text></Pressable>
+          <Text style={styles.currency}>₹</Text>
+          <TextInput
+            value={value}
+            onFocus={() => startDraft(option)}
+            onChangeText={(text) => changeDraft(option, text)}
+            onBlur={() => finishDraft(option)}
+            keyboardType="decimal-pad"
+            editable={!readOnly}
+            placeholder="0"
+            placeholderTextColor="#5C5240"
+            style={styles.amountInput}
+          />
+          <Pressable onPress={() => stepAmount(option, 100)} disabled={readOnly} style={styles.stepper}><Text style={styles.stepperText}>+</Text></Pressable>
+        </View>
+        <Pressable onPress={() => commitAmount(option, formatRupees(option.budgetMinor), !option.recurring)} disabled={readOnly} style={styles.recurringChip}>
+          <Text style={styles.recurringText}>{option.recurring ? "Recurring" : "One-off"}</Text>
+        </Pressable>
+      </View>
     );
   };
 
-  type PlannerRow = {
-    id: string;
-    label: string;
-    tint: string;
-    depth: number;
-    parentId?: string;
-  };
+  const totalFromVisibleChildren = plannerOptions.filter((option) => option.parentId).reduce((sum, option) => sum + option.budgetMinor, 0);
+  const rootOnlyTotal = plannerOptions.filter((option) => !option.parentId && !rowHasChildren(option.id)).reduce((sum, option) => sum + option.budgetMinor, 0);
+  const displayedTotal = totalFromVisibleChildren + rootOnlyTotal;
 
-  const allRows = useMemo<PlannerRow[]>(() => {
-    const merged: PlannerRow[] = [];
-    const childrenByParent = new Map<string, typeof categoryOptions>();
-    const roots: typeof categoryOptions = [];
-    for (const opt of categoryOptions) {
-      if (opt.parentId) {
-        const list = childrenByParent.get(opt.parentId) ?? [];
-        list.push(opt);
-        childrenByParent.set(opt.parentId, list);
-      } else {
-        roots.push(opt);
-      }
-    }
-    const sortedRoots = [...roots].sort((a, b) => a.label.localeCompare(b.label));
-    for (const root of sortedRoots) {
-      merged.push({
-        id: root.id,
-        label: root.label,
-        tint: root.tint,
-        depth: 0,
-        parentId: undefined,
-      });
-      const children = (childrenByParent.get(root.id) ?? []).sort((a, b) =>
-        a.label.localeCompare(b.label),
-      );
-      for (const child of children) {
-        merged.push({
-          id: child.id,
-          label: child.label,
-          tint: child.tint,
-          depth: 1,
-          parentId: root.id,
-        });
-      }
-    }
-    // Orphan children whose parent isn't in categoryOptions (rare) get rendered flat
-    const known = new Set(merged.map((r) => r.id));
-    for (const opt of categoryOptions) {
-      if (!known.has(opt.id)) {
-        merged.push({ id: opt.id, label: opt.label, tint: opt.tint, depth: 0 });
-        known.add(opt.id);
-      }
-    }
-    // Saved-budget rows that don't match any current category at all
-    for (const row of extraRows) {
-      if (!known.has(row.id)) {
-        merged.push({ id: row.id, label: row.label, tint: row.tint, depth: 0 });
-        known.add(row.id);
-      }
-    }
-    return merged;
-  }, [categoryOptions, extraRows]);
-
-  const rootOptions = useMemo(
-    () =>
-      categoryOptions
-        .filter((opt) => !opt.parentId)
-        .sort((a, b) => a.label.localeCompare(b.label)),
-    [categoryOptions],
-  );
-
-  const openAddCategory = () => {
-    setNewCategoryLabel("");
-    setNewCategoryParentId(null);
-    setAddModalVisible(true);
-  };
-
-  const closeAddCategory = () => {
-    if (creatingCategory) return;
-    setAddModalVisible(false);
-    setNewCategoryLabel("");
-    setNewCategoryParentId(null);
-  };
-
+  const rootOptions = categoryOptions.filter((option) => !option.parentId);
   const confirmAddCategory = async () => {
-    const trimmed = newCategoryLabel.trim();
-    if (!trimmed) return;
+    const label = newCategoryLabel.trim();
+    if (!label) return;
     setCreatingCategory(true);
     try {
-      const created = await actions.createCategory(
-        trimmed,
-        newCategoryParentId ? { parentId: newCategoryParentId } : undefined,
-      );
-      setExtraRows((prev) =>
-        prev.some((r) => r.id === created.id)
-          ? prev
-          : [...prev, { id: created.id, label: created.label, tint: created.tint }],
-      );
-      setRows((prev) => ({ ...prev, [created.id]: prev[created.id] ?? "" }));
+      await actions.createCategory(label, newCategoryParentId ? { parentId: newCategoryParentId } : undefined);
       setAddModalVisible(false);
       setNewCategoryLabel("");
       setNewCategoryParentId(null);
-    } catch (err) {
-      Alert.alert(
-        "Couldn't add category",
-        err instanceof Error ? err.message : "Try a different name.",
-      );
+    } catch (error) {
+      Alert.alert("Couldn't add category", error instanceof Error ? error.message : "Try again.");
     } finally {
       setCreatingCategory(false);
     }
   };
 
-  const totalMinor = useMemo(() => {
-    let sum = 0;
-    for (const id of Object.keys(rows)) {
-      const parsed = parseFloat((rows[id] ?? "").replace(/,/g, ""));
-      if (Number.isFinite(parsed) && parsed > 0) {
-        sum += Math.round(parsed * 100);
-      }
-    }
-    return sum;
-  }, [rows]);
-
-  const onSave = async () => {
-    const map: CategoryBudgetMap = {};
-    for (const id of Object.keys(rows)) {
-      const parsed = parseFloat((rows[id] ?? "").replace(/,/g, ""));
-      if (Number.isFinite(parsed) && parsed > 0) {
-        map[id] = Math.round(parsed * 100);
-      }
-    }
-    if (Object.keys(map).length === 0) {
-      // User zero'd everything → wipe the month entry entirely
-      await actions.clearMonthBudget(monthKey);
-    } else {
-      await actions.setBudget(monthKey, map);
-    }
-    navigation.goBack();
-  };
-
-  return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === "ios" ? "padding" : undefined}
-      style={[styles.container, { paddingTop: insets.top + 16 }]}
-    >
-      <Pressable onPress={() => navigation.goBack()} style={styles.back}>
-        <Text style={styles.backText}>‹ Back</Text>
-      </Pressable>
-
-      <Text style={styles.title}>{monthName} budget</Text>
+  const listHeader = (
+    <View>
+      <SpendMonthPager monthKey={monthKey} months={monthChoicesFor(monthKey)} onSelect={setSelectedMonth} />
+      <Text style={styles.title}>{spendMonthLabel(monthKey)} budget</Text>
       <Text style={styles.helper}>
-        Set per-category limits. Your monthly total adds up automatically.
+        {readOnly ? "Read-only history · actuals and the budget set for this month" : "Limits save as you edit. Parents are aggregate-only roll-ups of their children."}
       </Text>
-
       <View style={styles.totalCard}>
         <Text style={styles.totalLabel}>MONTHLY TOTAL</Text>
-        <Text style={styles.totalAmount}>
-          ₹{(totalMinor / 100).toLocaleString()}
-        </Text>
+        <Text style={styles.totalAmount}>{spendCurrency(displayedTotal)}</Text>
       </View>
+      <View style={styles.actionRow}>
+        <Pressable onPress={carryForward} disabled={readOnly || carryForwardBusy} style={styles.actionButton}><Text style={styles.actionText}>{carryForwardBusy ? "Carrying..." : "Carry forward recurring"}</Text></Pressable>
+        <Pressable onPress={clearBudget} disabled={readOnly} style={styles.actionButton}><Text style={[styles.actionText, styles.dangerText]}>Clear this month's budget</Text></Pressable>
+      </View>
+      <View style={styles.sortRow}>
+        <Text style={styles.sortLabel}>SORT</Text>
+        {(["amount", "name", "percent"] as const).map((mode) => <Pressable key={mode} onPress={() => setSortMode(mode)} style={[styles.sortChip, sortMode === mode && styles.sortChipActive]}><Text style={styles.sortText}>{mode === "amount" ? "Amount" : mode === "name" ? "Name" : "% used"}</Text></Pressable>)}
+      </View>
+      {plannerOptions.length > 12 ? <TextInput value={search} onChangeText={setSearch} placeholder="Search categories" placeholderTextColor="#665B43" style={styles.searchInput} /> : null}
+      {notice ? <Text style={styles.notice}>{notice}</Text> : null}
+    </View>
+  );
 
-      <ScrollView
-        style={styles.scroll}
-        contentContainerStyle={{ paddingBottom: 24 }}
+  return (
+    <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={[styles.container, { paddingTop: insets.top + 12 }]}>
+      <Pressable onPress={() => navigation.goBack()} style={styles.back}><Text style={styles.backText}>‹ Back</Text></Pressable>
+      <FlatList
+        data={listData}
+        renderItem={renderItem}
+        keyExtractor={(item) => item.id}
+        ListHeaderComponent={listHeader}
+        ListEmptyComponent={<Text style={styles.emptyText}>No categories yet. Add one to start budgeting.</Text>}
+        ListFooterComponent={<Pressable onPress={() => setAddModalVisible(true)} style={styles.addRow}><Text style={styles.addPlus}>+</Text><Text style={styles.addText}>Add category</Text></Pressable>}
+        contentContainerStyle={styles.listContent}
         keyboardShouldPersistTaps="handled"
-      >
-        {allRows.length === 0 ? (
-          <Text style={styles.emptyText}>
-            No categories yet. Add one to start budgeting.
-          </Text>
-        ) : null}
+        showsVerticalScrollIndicator={false}
+      />
 
-        {allRows.map((row) => (
-          <View
-            key={row.id}
-            style={[styles.row, row.depth > 0 && styles.rowChild]}
-          >
-            <Pressable
-              style={styles.rowLeft}
-              onPress={() =>
-                openEditCategory(row.id as SpendCategoryId, row.label, "name")
-              }
-              onLongPress={() =>
-                openEditCategory(row.id as SpendCategoryId, row.label, "name")
-              }
-              delayLongPress={350}
-            >
-              <View style={[styles.dot, { backgroundColor: row.tint }]} />
-              <Text
-                style={[styles.rowLabel, row.depth > 0 && styles.rowLabelChild]}
-                numberOfLines={1}
-              >
-                {row.label}
-              </Text>
-            </Pressable>
-            <Pressable
-              hitSlop={10}
-              onPress={() =>
-                openEditCategory(row.id as SpendCategoryId, row.label, "name")
-              }
-              style={styles.editBtn}
-            >
-              <Text style={styles.editBtnText}>⋯</Text>
-            </Pressable>
-            <Pressable
-              style={styles.rowRight}
-              onPress={() =>
-                openEditCategory(row.id as SpendCategoryId, row.label, "amount")
-              }
-            >
-              <Text style={styles.currency}>₹</Text>
-              <Text style={[styles.amountDisplay, !rows[row.id] && styles.amountDisplayEmpty]}>
-                {rows[row.id] || "0"}
-              </Text>
-            </Pressable>
-          </View>
-        ))}
+      {undo ? <Pressable onPress={undoLastEdit} disabled={undoing} style={styles.snackbar}><Text style={styles.snackbarText}>{undoing ? "Undoing..." : `${undo.label} updated`}</Text><Text style={styles.undoText}>UNDO</Text></Pressable> : null}
 
-        <Pressable onPress={openAddCategory} style={styles.addRow}>
-          <Text style={styles.addPlus}>+</Text>
-          <Text style={styles.addText}>Add category</Text>
-        </Pressable>
-      </ScrollView>
-
-      <Modal
-        animationType="fade"
-        transparent
-        visible={addModalVisible}
-        onRequestClose={closeAddCategory}
-      >
-        <View style={styles.modalBackdrop}>
-          <Pressable style={StyleSheet.absoluteFillObject} onPress={closeAddCategory} />
-          <View style={styles.modalSheet}>
-            <Text style={styles.modalKicker}>New category</Text>
-            <Text style={styles.modalTitle}>Name this category</Text>
-            <Text style={styles.modalHint}>
-              It'll show up in this month's planner and on the budget breakdown.
-            </Text>
-            <TextInput
-              ref={addInputRef}
-              value={newCategoryLabel}
-              onChangeText={setNewCategoryLabel}
-              placeholder="Rent, Family, Subscriptions..."
-              placeholderTextColor="rgba(180,220,240,0.35)"
-              style={styles.modalInput}
-              editable={!creatingCategory}
-              onSubmitEditing={confirmAddCategory}
-            />
-
-            {rootOptions.length > 0 ? (
-              <>
-                <Text style={styles.parentLabel}>Add under (optional)</Text>
-                <ScrollView
-                  horizontal
-                  showsHorizontalScrollIndicator={false}
-                  contentContainerStyle={styles.parentChipWrap}
-                  keyboardShouldPersistTaps="handled"
-                >
-                  <Pressable
-                    onPress={() => setNewCategoryParentId(null)}
-                    style={[
-                      styles.parentChip,
-                      newCategoryParentId === null && styles.parentChipActive,
-                    ]}
-                  >
-                    <Text style={styles.parentChipText}>None (top-level)</Text>
-                  </Pressable>
-                  {rootOptions.map((opt) => {
-                    const active = newCategoryParentId === opt.id;
-                    return (
-                      <Pressable
-                        key={opt.id}
-                        onPress={() => setNewCategoryParentId(opt.id)}
-                        style={[
-                          styles.parentChip,
-                          { borderColor: opt.tint },
-                          active && styles.parentChipActive,
-                        ]}
-                      >
-                        <View
-                          style={[styles.parentChipDot, { backgroundColor: opt.tint }]}
-                        />
-                        <Text style={styles.parentChipText}>{opt.label}</Text>
-                      </Pressable>
-                    );
-                  })}
-                </ScrollView>
-              </>
-            ) : null}
-
-            <View style={styles.modalActions}>
-              <Pressable style={styles.modalBtn} onPress={closeAddCategory} disabled={creatingCategory}>
-                <Text style={styles.modalBtnText}>Cancel</Text>
-              </Pressable>
-              <Pressable
-                style={[
-                  styles.modalBtn,
-                  styles.modalBtnPrimary,
-                  newCategoryLabel.trim().length === 0 && styles.modalBtnDisabled,
-                ]}
-                onPress={confirmAddCategory}
-                disabled={creatingCategory || newCategoryLabel.trim().length === 0}
-              >
-                <Text style={[styles.modalBtnText, styles.modalBtnTextPrimary]}>
-                  {creatingCategory ? "Adding..." : "Add"}
-                </Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
+      <Modal animationType="fade" transparent visible={addModalVisible} onRequestClose={() => setAddModalVisible(false)}>
+        <View style={styles.modalBackdrop}><Pressable style={StyleSheet.absoluteFillObject} onPress={() => setAddModalVisible(false)} /><View style={styles.modalSheet}>
+          <Text style={styles.modalKicker}>New category</Text><Text style={styles.modalTitle}>Name this category</Text>
+          <TextInput ref={addInputRef} value={newCategoryLabel} onChangeText={setNewCategoryLabel} placeholder="Rent, Family, Subscriptions..." placeholderTextColor="#665B43" style={styles.modalInput} autoFocus />
+          {rootOptions.length > 0 ? <><Text style={styles.parentLabel}>Add under (optional)</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.parentChipWrap}>
+            <Pressable onPress={() => setNewCategoryParentId(null)} style={[styles.parentChip, newCategoryParentId === null && styles.parentChipActive]}><Text style={styles.parentChipText}>None</Text></Pressable>
+            {rootOptions.map((option) => <Pressable key={option.id} onPress={() => setNewCategoryParentId(option.id)} style={[styles.parentChip, { borderColor: option.tint }, newCategoryParentId === option.id && styles.parentChipActive]}><Text style={styles.parentChipText}>{option.label}</Text></Pressable>)}
+          </ScrollView></> : null}
+          <View style={styles.modalActions}><Pressable onPress={() => setAddModalVisible(false)} style={styles.modalButton}><Text style={styles.modalButtonText}>Cancel</Text></Pressable><Pressable onPress={confirmAddCategory} disabled={creatingCategory || !newCategoryLabel.trim()} style={[styles.modalButton, styles.modalButtonPrimary]}><Text style={styles.modalButtonPrimaryText}>{creatingCategory ? "Adding..." : "Add"}</Text></Pressable></View>
+        </View></View>
       </Modal>
-
-      <Modal
-        animationType="fade"
-        transparent
-        visible={editingCategoryId !== null}
-        onRequestClose={closeEditCategory}
-      >
-        <View style={styles.modalBackdrop}>
-          <Pressable style={StyleSheet.absoluteFillObject} onPress={closeEditCategory} />
-          <View style={styles.modalSheet}>
-            <Text style={styles.modalKicker}>Edit category</Text>
-            <Text style={styles.modalTitle}>{editingCategory?.label ?? ""}</Text>
-
-            <Text style={styles.parentLabel}>Name</Text>
-            <TextInput
-              ref={editNameInputRef}
-              value={editingLabel}
-              onChangeText={setEditingLabel}
-              placeholder="Category name"
-              placeholderTextColor="rgba(180,220,240,0.35)"
-              style={styles.modalInput}
-              editable={!savingEdit}
-              selectTextOnFocus={editFocusTarget === "name"}
-            />
-
-            <Text style={styles.parentLabel}>Budget amount</Text>
-            <View style={styles.amountInputWrap}>
-              <Text style={styles.amountInputCurrency}>₹</Text>
-              <TextInput
-                ref={editAmountInputRef}
-                value={editingAmount}
-                onChangeText={setEditingAmount}
-                placeholder="0"
-                placeholderTextColor="rgba(180,220,240,0.35)"
-                keyboardType="numeric"
-                style={styles.amountInputField}
-                editable={!savingEdit}
-                selectTextOnFocus={editFocusTarget === "amount"}
-                onSubmitEditing={confirmEdit}
-              />
-            </View>
-
-            <View style={styles.modalActions}>
-              <Pressable
-                style={[styles.modalBtn, styles.modalBtnDanger]}
-                onPress={confirmDelete}
-                disabled={savingEdit}
-              >
-                <Text style={[styles.modalBtnText, styles.modalBtnTextDanger]}>Delete</Text>
-              </Pressable>
-              <Pressable style={styles.modalBtn} onPress={closeEditCategory} disabled={savingEdit}>
-                <Text style={styles.modalBtnText}>Cancel</Text>
-              </Pressable>
-              <Pressable
-                style={[styles.modalBtn, styles.modalBtnPrimary]}
-                onPress={confirmEdit}
-                disabled={savingEdit || editingLabel.trim().length === 0}
-              >
-                <Text style={[styles.modalBtnText, styles.modalBtnTextPrimary]}>
-                  {savingEdit ? "Saving..." : "Save"}
-                </Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
-
-      <Pressable
-        onPress={onSave}
-        style={[styles.button, totalMinor <= 0 && styles.buttonDisabled]}
-        disabled={totalMinor <= 0}
-      >
-        <Text style={styles.buttonText}>Save</Text>
-      </Pressable>
     </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#070709", padding: 24 },
+  container: { flex: 1, backgroundColor: "#070709", paddingHorizontal: 20 },
   back: { paddingVertical: 8 },
   backText: { color: "#9C8B5C", fontSize: 14 },
-  title: { color: "#F5E6B8", fontSize: 22, fontWeight: "500", marginTop: 8 },
-  helper: { color: "#9C8B5C", fontSize: 13, marginTop: 6, marginBottom: 18 },
-  totalCard: {
-    backgroundColor: "rgba(255,210,122,0.06)",
-    borderColor: "rgba(255,210,122,0.18)",
-    borderWidth: 1,
-    borderRadius: 14,
-    padding: 14,
-    marginBottom: 16,
-  },
+  listContent: { paddingBottom: 36 },
+  title: { color: "#F5E6B8", fontSize: 23, fontWeight: "500", marginTop: 16 },
+  helper: { color: "#9C8B5C", fontSize: 12, lineHeight: 18, marginTop: 6, marginBottom: 14 },
+  totalCard: { backgroundColor: "rgba(255,210,122,0.06)", borderColor: "rgba(255,210,122,0.18)", borderWidth: 1, borderRadius: 14, padding: 14, marginBottom: 10 },
   totalLabel: { color: "#9C8B5C", fontSize: 10, letterSpacing: 1.6, fontWeight: "600" },
-  totalAmount: { color: "#F5E6B8", fontSize: 28, fontWeight: "300", marginTop: 4 },
-  scroll: { flex: 1 },
-  row: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderColor: "rgba(255,255,255,0.05)",
-  },
-  rowLeft: { flexDirection: "row", alignItems: "center", flex: 1 },
+  totalAmount: { color: "#F5E6B8", fontSize: 26, fontWeight: "300", marginTop: 4 },
+  actionRow: { gap: 8, marginBottom: 14 },
+  actionButton: { borderWidth: 1, borderColor: "rgba(255,210,122,0.20)", borderRadius: 10, paddingVertical: 10, paddingHorizontal: 12 },
+  actionText: { color: "#FFD27A", fontSize: 12, fontWeight: "600" },
+  dangerText: { color: "#FF8E72" },
+  sortRow: { flexDirection: "row", alignItems: "center", gap: 7, marginBottom: 10 },
+  sortLabel: { color: "#665B43", fontSize: 10, letterSpacing: 1.2, marginRight: 2 },
+  sortChip: { borderWidth: 1, borderColor: "rgba(255,255,255,0.08)", borderRadius: 999, paddingVertical: 6, paddingHorizontal: 9 },
+  sortChipActive: { backgroundColor: "rgba(255,210,122,0.16)", borderColor: "rgba(255,210,122,0.35)" },
+  sortText: { color: "#D8CDB0", fontSize: 11 },
+  searchInput: { color: "#F5E6B8", borderWidth: 1, borderColor: "rgba(255,255,255,0.10)", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 9, marginBottom: 12 },
+  notice: { color: "#FFD27A", fontSize: 12, marginBottom: 10 },
+  sectionTitle: { color: "#9C8B5C", fontSize: 11, letterSpacing: 1.4, textTransform: "uppercase", marginTop: 14, marginBottom: 5 },
+  groupRow: { flexDirection: "row", alignItems: "center", paddingVertical: 12, borderBottomWidth: 1, borderColor: "rgba(255,255,255,0.05)" },
+  groupCopy: { flex: 1, marginRight: 10 },
+  labelLine: { flexDirection: "row", alignItems: "center", gap: 8 },
+  groupLabel: { color: "#D8CDB0", fontSize: 15, fontWeight: "600" },
+  aggregateTag: { color: "#665B43", fontSize: 9, letterSpacing: 0.8 },
+  chevron: { color: "#9C8B5C", fontSize: 16, marginLeft: "auto" },
+  groupAmount: { color: "#F5E6B8", fontSize: 14, minWidth: 60, textAlign: "right" },
+  childRow: { flexDirection: "row", alignItems: "center", paddingVertical: 10, paddingLeft: 20, borderBottomWidth: 1, borderColor: "rgba(255,255,255,0.04)" },
+  childCopy: { flex: 1, marginRight: 8 },
+  childLabel: { color: "#D8CDB0", fontSize: 13 },
+  renameInput: { color: "#F5E6B8", borderBottomWidth: 1, borderColor: "#FFD27A", paddingVertical: 2, fontSize: 13 },
+  renameGroupInput: { color: "#F5E6B8", borderBottomWidth: 1, borderColor: "#FFD27A", paddingVertical: 1, fontSize: 15, minWidth: 100 },
   dot: { width: 8, height: 8, borderRadius: 4, marginRight: 10 },
-  rowLabel: { color: "#D8CDB0", fontSize: 15, fontWeight: "500" },
-  rowRight: { flexDirection: "row", alignItems: "center" },
-  currency: { color: "#7A6B41", fontSize: 16, marginRight: 4 },
-  input: {
-    color: "#F5E6B8",
-    fontSize: 18,
-    minWidth: 90,
-    textAlign: "right",
-    paddingVertical: 6,
-  },
-  button: {
-    marginTop: 16,
-    padding: 16,
-    borderRadius: 12,
-    backgroundColor: "#FFD27A",
-    alignItems: "center",
-  },
-  buttonDisabled: { opacity: 0.4 },
-  buttonText: { color: "rgb(7,7,9)", fontSize: 15, fontWeight: "600" },
-  addRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingVertical: 14,
-    marginTop: 6,
-  },
-  addPlus: {
-    color: "#FFD27A",
-    fontSize: 18,
-    width: 22,
-    textAlign: "center",
-    marginRight: 6,
-  },
+  track: { height: 6, borderRadius: 5, overflow: "hidden", backgroundColor: "rgba(255,255,255,0.08)", marginTop: 7 },
+  fill: { height: "100%", borderRadius: 5 },
+  meta: { color: "#8F8F96", fontSize: 10, marginTop: 5 },
+  amountEditor: { flexDirection: "row", alignItems: "center" },
+  currency: { color: "#7A6B41", fontSize: 13 },
+  amountInput: { color: "#F5E6B8", fontSize: 15, minWidth: 52, paddingVertical: 5, paddingHorizontal: 2, textAlign: "right" },
+  stepper: { paddingHorizontal: 4, paddingVertical: 5 },
+  stepperText: { color: "#FFD27A", fontSize: 18 },
+  recurringChip: { marginLeft: 8, borderRadius: 999, backgroundColor: "rgba(255,210,122,0.10)", paddingVertical: 5, paddingHorizontal: 7 },
+  recurringText: { color: "#9C8B5C", fontSize: 9 },
+  addRow: { flexDirection: "row", alignItems: "center", paddingVertical: 18 },
+  addPlus: { color: "#FFD27A", fontSize: 18, width: 22, textAlign: "center" },
   addText: { color: "#FFD27A", fontSize: 14, fontWeight: "500" },
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.55)",
-    justifyContent: "flex-end",
-  },
-  modalSheet: {
-    backgroundColor: "#0E0C0A",
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    padding: 22,
-    paddingBottom: 32,
-    borderTopWidth: 1,
-    borderColor: "rgba(245,230,184,0.10)",
-  },
-  modalKicker: {
-    color: "#9C8B5C",
-    fontSize: 11,
-    letterSpacing: 1.6,
-    fontWeight: "600",
-    textTransform: "uppercase",
-  },
+  emptyText: { color: "rgba(255,255,255,0.5)", fontSize: 13, paddingVertical: 16 },
+  snackbar: { position: "absolute", left: 20, right: 20, bottom: 22, borderRadius: 12, paddingVertical: 13, paddingHorizontal: 15, backgroundColor: "#1A1711", borderWidth: 1, borderColor: "rgba(255,210,122,0.35)", flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  snackbarText: { color: "#D8CDB0", fontSize: 12 },
+  undoText: { color: "#FFD27A", fontSize: 11, fontWeight: "700", letterSpacing: 1 },
+  modalBackdrop: { flex: 1, backgroundColor: "rgba(0,0,0,0.55)", justifyContent: "flex-end" },
+  modalSheet: { backgroundColor: "#0E0C0A", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 22, paddingBottom: 32, borderTopWidth: 1, borderColor: "rgba(245,230,184,0.10)" },
+  modalKicker: { color: "#9C8B5C", fontSize: 11, letterSpacing: 1.6, fontWeight: "600", textTransform: "uppercase" },
   modalTitle: { color: "#F5E6B8", fontSize: 20, fontWeight: "500", marginTop: 6 },
-  modalHint: { color: "#8F8F96", fontSize: 12, marginTop: 8, lineHeight: 18 },
-  modalInput: {
-    color: "#F5E6B8",
-    fontSize: 14,
-    backgroundColor: "rgba(255,255,255,0.04)",
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderWidth: 1,
-    borderColor: "rgba(245,230,184,0.10)",
-    marginTop: 14,
-  },
-  modalActions: { flexDirection: "row", gap: 8, marginTop: 16, justifyContent: "flex-end" },
-  modalBtn: {
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderRadius: 10,
-    backgroundColor: "rgba(255,255,255,0.04)",
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.08)",
-  },
-  modalBtnText: { color: "#D8CDB0", fontSize: 13, fontWeight: "500" },
-  modalBtnPrimary: { backgroundColor: "#FFD27A", borderColor: "#FFD27A" },
-  modalBtnTextPrimary: { color: "rgb(7,7,9)" },
-  modalBtnDisabled: { opacity: 0.45 },
-  emptyText: {
-    color: "rgba(255,255,255,0.5)",
-    fontSize: 13,
-    paddingVertical: 12,
-  },
-  rowChild: { paddingLeft: 22 },
-  rowLabelChild: { fontSize: 13, color: "rgba(216,205,176,0.85)" },
-  parentLabel: {
-    color: "#9C8B5C",
-    fontSize: 11,
-    letterSpacing: 1.5,
-    textTransform: "uppercase",
-    marginTop: 18,
-    marginBottom: 8,
-  },
-  parentChipWrap: {
-    flexDirection: "row",
-    gap: 8,
-    paddingRight: 8,
-  },
-  parentChip: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.10)",
-    backgroundColor: "rgba(255,255,255,0.04)",
-  },
+  modalInput: { color: "#F5E6B8", fontSize: 14, backgroundColor: "rgba(255,255,255,0.04)", borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12, borderWidth: 1, borderColor: "rgba(245,230,184,0.10)", marginTop: 14 },
+  parentLabel: { color: "#9C8B5C", fontSize: 11, letterSpacing: 1.5, textTransform: "uppercase", marginTop: 18, marginBottom: 8 },
+  parentChipWrap: { gap: 8, paddingRight: 8 },
+  parentChip: { paddingVertical: 8, paddingHorizontal: 12, borderRadius: 999, borderWidth: 1, borderColor: "rgba(255,255,255,0.10)", backgroundColor: "rgba(255,255,255,0.04)" },
   parentChipActive: { backgroundColor: "rgba(255,210,122,0.18)" },
-  parentChipDot: { width: 8, height: 8, borderRadius: 4, marginRight: 8 },
-  parentChipText: { color: "#D8CDB0", fontSize: 12, fontWeight: "500" },
-  editBtn: { paddingHorizontal: 8, paddingVertical: 4, marginRight: 4 },
-  editBtnText: { color: "#9C8B5C", fontSize: 22, fontWeight: "600", lineHeight: 22 },
-  modalBtnDanger: { borderColor: "rgba(255,142,114,0.55)" },
-  modalBtnTextDanger: { color: "#FF8E72" },
-  amountInputWrap: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "rgba(255,255,255,0.04)",
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 4,
-    borderWidth: 1,
-    borderColor: "rgba(245,230,184,0.10)",
-    marginTop: 4,
-  },
-  amountInputCurrency: { color: "#7A6B41", fontSize: 16, marginRight: 6 },
-  amountInputField: { flex: 1, color: "#F5E6B8", fontSize: 16, paddingVertical: 10 },
-  amountDisplay: {
-    color: "#F5E6B8",
-    fontSize: 18,
-    minWidth: 60,
-    textAlign: "right",
-    paddingVertical: 6,
-  },
-  amountDisplayEmpty: { color: "#5C5240" },
+  parentChipText: { color: "#D8CDB0", fontSize: 12 },
+  modalActions: { flexDirection: "row", gap: 8, marginTop: 18, justifyContent: "flex-end" },
+  modalButton: { paddingVertical: 10, paddingHorizontal: 14, borderRadius: 10, backgroundColor: "rgba(255,255,255,0.04)", borderWidth: 1, borderColor: "rgba(255,255,255,0.08)" },
+  modalButtonText: { color: "#D8CDB0", fontSize: 13 },
+  modalButtonPrimary: { backgroundColor: "#FFD27A", borderColor: "#FFD27A" },
+  modalButtonPrimaryText: { color: "#070709", fontSize: 13, fontWeight: "600" },
 });

@@ -12,6 +12,7 @@ import type {
   SpendCategoryId,
   SpendDailyBucket,
   SpendDataRepository,
+  BudgetWriteResult,
   SpendPlanType,
   SpendSeedTransactionInput,
   SpendTransaction,
@@ -379,9 +380,14 @@ export class SqliteSpendRepository implements SpendDataRepository {
     await this.executeWithConflict({ commandId: uuid(), kind: "setPlanType", expectedRevision: revision, payload: { transactionId, planType } }, () => this.transactionRevision(transactionId));
   }
 
-  async setBudgetAmount(monthKey: string, categoryId: SpendCategoryId, amountMinor: number, recurring = false): Promise<void> {
-    const revision = await this.monthRevision(monthKey);
-    await this.executeWithConflict({ commandId: uuid(), kind: "setBudgetAmount", expectedRevision: revision, payload: { monthKey, categoryId, amountMinor, recurring } }, () => this.monthRevision(monthKey));
+  async setBudgetAmount(monthKey: string, categoryId: SpendCategoryId, amountMinor: number, recurring = false, expectedRevision?: number): Promise<BudgetWriteResult> {
+    const revision = expectedRevision ?? await this.monthRevision(monthKey);
+    const result = await this.executeWithConflict({ commandId: uuid(), kind: "setBudgetAmount", expectedRevision: revision, payload: { monthKey, categoryId, amountMinor, recurring } }, () => this.monthRevision(monthKey));
+    return { revision: result.revision };
+  }
+
+  async budgetRevision(monthKey: string): Promise<number> {
+    return this.monthRevision(monthKey);
   }
 
   async clearMonthBudget(monthKey: string): Promise<void> {
@@ -488,6 +494,18 @@ export const sqliteRepository = new SqliteSpendRepository();
 
 export function spendMonthLabel(monthKey: string): string {
   return monthLabel(monthKey);
+}
+
+export function previousAccountingMonthKey(monthKey: string): string {
+  const [year, month] = monthKey.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 2, 1));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+export function nextAccountingMonthKey(monthKey: string): string {
+  const [year, month] = monthKey.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month, 1));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
 export function spendCurrency(amountMinor: number): string {

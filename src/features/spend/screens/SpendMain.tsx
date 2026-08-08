@@ -16,13 +16,14 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import MaterialCommunityIcons from "react-native-vector-icons/MaterialCommunityIcons";
 
 import { useSpend } from "../store/SpendProvider";
-import { spendMonthLabel } from "../store/sqliteRepository";
+import { accountingMonthKey, previousAccountingMonthKey, spendMonthLabel } from "../store/sqliteRepository";
 import SpendTodayHeroCard from "../components/SpendTodayHeroCard";
 import SpendBudgetCard from "../components/SpendBudgetCard";
 import SpendDayTransactionsCard from "../components/SpendDayTransactionsCard";
 import SpendCategoryCard from "../components/SpendCategoryCard";
 import SpendDailyBarsCard from "../components/SpendDailyBarsCard";
 import SpendNeedsReviewCard from "../components/SpendNeedsReviewCard";
+import SpendMonthPager from "../components/SpendMonthPager";
 
 export default function SpendMain() {
   const insets = useSafeAreaInsets();
@@ -37,6 +38,7 @@ export default function SpendMain() {
     widgetSnapshot,
     currentMonthBudget,
     selectedMonth,
+    setSelectedMonth,
     getTransactionsForDay,
     dailyBuckets,
     actions,
@@ -78,6 +80,22 @@ export default function SpendMain() {
   }, [activeBucket?.date, getTransactionsForDay, domain.state.transactions.length]);
 
   const monthName = useMemo(() => spendMonthLabel(selectedMonth), [selectedMonth]);
+  const monthChoices = useMemo(() => {
+    const choices = [selectedMonth];
+    let cursor = selectedMonth;
+    for (let index = 0; index < 2; index += 1) {
+      cursor = previousAccountingMonthKey(cursor);
+      choices.unshift(cursor);
+    }
+    cursor = selectedMonth;
+    for (let index = 0; index < 2; index += 1) {
+      const [year, month] = cursor.split("-").map(Number);
+      const next = new Date(Date.UTC(year, month, 1));
+      cursor = `${next.getUTCFullYear()}-${String(next.getUTCMonth() + 1).padStart(2, "0")}`;
+      choices.push(cursor);
+    }
+    return choices;
+  }, [selectedMonth]);
 
   // Deep-link routing
   useEffect(() => {
@@ -192,6 +210,11 @@ export default function SpendMain() {
         showsVerticalScrollIndicator={false}
       >
         <Text style={styles.pageTitle}>Spend</Text>
+
+        <SpendMonthPager monthKey={selectedMonth} months={monthChoices} onSelect={setSelectedMonth} />
+        {selectedMonth < accountingMonthKey() ? (
+          <Text style={styles.readOnlyHint}>{monthName} is read-only. Actuals and the budget set for that month are preserved.</Text>
+        ) : null}
 
         {domain.state.syncStates.find((s) => s.source === "sms")?.status === "needs_permission" ? (
           <Pressable
@@ -392,6 +415,7 @@ export default function SpendMain() {
 const styles = StyleSheet.create({
   page: { flex: 1, backgroundColor: "#070709" },
   content: { paddingHorizontal: 18 },
+  readOnlyHint: { color: "#9C8B5C", fontSize: 12, marginTop: 8 },
   cardSlot: { marginBottom: 18 },
   pageTitle: {
     color: "#FFFFFF",

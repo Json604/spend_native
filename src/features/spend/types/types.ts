@@ -46,6 +46,7 @@ export type SpendCategoryPreview = {
   spentMinor?: number;
   budgetMinor?: number;
   pct?: number;
+  deltaMinor?: number;
   parentId?: SpendCategoryId;
   depth?: number; // 0 = root, 1 = child, ...
 };
@@ -260,7 +261,14 @@ export type SpendDataRepository = {
   assignCategory: (transactionId: string, categoryId: SpendCategoryId) => Promise<void>;
   ignoreTransaction: (transactionId: string) => Promise<void>;
   setPlanType: (transactionId: string, planType: SpendPlanType) => Promise<void>;
-  setBudgetAmount: (monthKey: string, categoryId: SpendCategoryId, amountMinor: number, recurring?: boolean) => Promise<void>;
+  setBudgetAmount: (
+    monthKey: string,
+    categoryId: SpendCategoryId,
+    amountMinor: number,
+    recurring?: boolean,
+    expectedRevision?: number,
+  ) => Promise<BudgetWriteResult>;
+  budgetRevision: (monthKey: string) => Promise<number>;
   clearMonthBudget: (monthKey: string) => Promise<void>;
   createCategory: (label: string, opts?: { parentId?: SpendCategoryId }) => Promise<SpendCategoryDefinition>;
   renameCategory: (categoryId: SpendCategoryId, newLabel: string) => Promise<void>;
@@ -308,7 +316,8 @@ export type SpendContextType = {
     }) => Promise<void>;
     setTransactionPlanType: (transactionId: string, planType: SpendPlanType) => Promise<void>;
     setPlanType: (transactionId: string, planType: SpendPlanType) => Promise<void>;
-    setBudgetAmount: (monthKey: string, categoryId: SpendCategoryId, amountMinor: number, recurring?: boolean) => Promise<void>;
+    setBudgetAmount: (monthKey: string, categoryId: SpendCategoryId, amountMinor: number, recurring?: boolean, expectedRevision?: number) => Promise<BudgetWriteResult>;
+    carryForwardBudget: (monthKey: string) => Promise<number>;
     createCategory: (
       label: string,
       opts?: { parentId?: SpendCategoryId },
@@ -332,3 +341,7 @@ export type MonthlyBudget = {
 };
 
 export type MonthlyBudgetMap = Record<string, MonthlyBudget>;
+
+export type BudgetWriteResult = {
+  revision: number;
+};

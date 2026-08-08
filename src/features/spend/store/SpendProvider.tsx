@@ -24,6 +24,7 @@ import type {
 } from "../types/types";
 import {
   accountingMonthKey,
+  previousAccountingMonthKey,
   spendCurrency,
   spendMonthLabel,
   sqliteRepository,
@@ -77,11 +78,13 @@ function buildLoadedData(
   transactions: SpendTransaction[],
   categories: Awaited<ReturnType<SqliteSpendRepository["categories"]>>,
   breakdown: Awaited<ReturnType<SqliteSpendRepository["categoryBreakdown"]>>,
+  previousBreakdown: Awaited<ReturnType<SqliteSpendRepository["categoryBreakdown"]>>,
   summaryRow: Awaited<ReturnType<SqliteSpendRepository["monthSummary"]>>,
   reviewTransactions: SpendTransaction[],
   budget: SpendContextType["currentMonthBudget"],
   dailyBuckets: SpendContextType["dailyBuckets"],
 ): LoadedSpendData {
+  const previousSpent = new Map(previousBreakdown.map((row) => [row.categoryId, row.spentMinor]));
   const summaryBase = {
     monthLabel: spendMonthLabel(monthKey),
     totalMinor: summaryRow.totalSpentMinor,
@@ -124,6 +127,7 @@ function buildLoadedData(
       spentMinor: row.spentMinor,
       budgetMinor: row.budgetedMinor > 0 ? row.budgetedMinor : undefined,
       pct: row.budgetedMinor > 0 ? row.spentMinor / row.budgetedMinor : 0,
+      deltaMinor: row.spentMinor - (previousSpent.get(row.categoryId) ?? 0),
       parentId: row.parentId,
       depth: row.parentId ? 1 : 0,
     }));
@@ -186,16 +190,17 @@ export function SpendProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const reload = useCallback(async (monthKey = selectedMonth) => {
-    const [summary, breakdown, transactions, review, budget, daily, categories] = await Promise.all([
+    const [summary, breakdown, previousBreakdown, transactions, review, budget, daily, categories] = await Promise.all([
       repository.monthSummary(monthKey),
       repository.categoryBreakdown(monthKey),
+      repository.categoryBreakdown(previousAccountingMonthKey(monthKey)),
       repository.transactionsForMonth(monthKey),
       repository.needsReview(monthKey),
       repository.budgetsForMonth(monthKey),
       repository.dailyBuckets(monthKey),
       repository.categories(monthKey),
     ]);
-    setLoaded(buildLoadedData(monthKey, syncStates, transactions, categories, breakdown, summary, review, budget, daily));
+    setLoaded(buildLoadedData(monthKey, syncStates, transactions, categories, breakdown, previousBreakdown, summary, review, budget, daily));
   }, [repository, selectedMonth, syncStates]);
 
   useEffect(() => {
@@ -264,9 +269,27 @@ export function SpendProvider({ children }: { children: ReactNode }) {
 
   const setPlanType = setTransactionPlanType;
 
-  const setBudgetAmount = useCallback(async (monthKey: string, categoryId: SpendCategoryId, amountMinor: number, recurring?: boolean) => {
-    await repository.setBudgetAmount(monthKey, categoryId, amountMinor, recurring);
+  const setBudgetAmount = useCallback(async (monthKey: string, categoryId: SpendCategoryId, amountMinor: number, recurring?: boolean, expectedRevision?: number) => {
+    const result = await repository.setBudgetAmount(monthKey, categoryId, amountMinor, recurring, expectedRevision);
     await refreshAfterWrite();
+    return result;
+  }, [repository, refreshAfterWrite]);
+
+  const carryForwardBudget = useCallback(async (monthKey: string) => {
+    const [source, destination] = await Promise.all([
+      repository.budgetsForMonth(previousAccountingMonthKey(monthKey)),
+      repository.budgetsForMonth(monthKey),
+    ]);
+    if (!source) return 0;
+    const existing = new Set(Object.keys(destination?.categoryBudgets ?? {}));
+    let copied = 0;
+    for (const [categoryId, amountMinor] of Object.entries(source.categoryBudgets)) {
+      if (!source.categoryRecurring?.[categoryId] || existing.has(categoryId)) continue;
+      await repository.setBudgetAmount(monthKey, categoryId as SpendCategoryId, amountMinor, true);
+      copied += 1;
+    }
+    if (copied > 0) await refreshAfterWrite();
+    return copied;
   }, [repository, refreshAfterWrite]);
 
   const createCategory = useCallback(async (label: string, opts?: { parentId?: SpendCategoryId }) => {
@@ -341,7 +364,7 @@ export function SpendProvider({ children }: { children: ReactNode }) {
   }, [loading, refreshSmsInboxToday]);
 
   const value = useMemo((): SpendContextType => {
-    const data = loaded ?? buildLoadedData(selectedMonth, syncStates, [], [], [], { totalSpentMinor: 0, budgetTotalMinor: 0, daysRemaining: 0, transactionCount: 0, reviewCount: 0 }, [], null, []);
+    const data = loaded ?? buildLoadedData(selectedMonth, syncStates, [], [], [], [], { totalSpentMinor: 0, budgetTotalMinor: 0, daysRemaining: 0, transactionCount: 0, reviewCount: 0 }, [], null, []);
     return {
       repository,
       domain: data.domain,
@@ -370,6 +393,7 @@ export function SpendProvider({ children }: { children: ReactNode }) {
         setTransactionPlanType,
         setPlanType,
         setBudgetAmount,
+        carryForwardBudget,
         createCategory,
         renameCategory,
         archiveCategory,
@@ -377,7 +401,7 @@ export function SpendProvider({ children }: { children: ReactNode }) {
         clearMonthBudget,
       },
     };
-  }, [loaded, repository, selectedMonth, syncStates, grantSmsAccess, refreshSmsInbox, assignReviewCategory, assignCategory, ignoreTransaction, addManualTransaction, setTransactionPlanType, setPlanType, setBudgetAmount, createCategory, renameCategory, archiveCategory, setBudget, clearMonthBudget]);
+  }, [loaded, repository, selectedMonth, syncStates, grantSmsAccess, refreshSmsInbox, assignReviewCategory, assignCategory, ignoreTransaction, addManualTransaction, setTransactionPlanType, setPlanType, setBudgetAmount, carryForwardBudget, createCategory, renameCategory, archiveCategory, setBudget, clearMonthBudget]);
 
   useEffect(() => {
     if (!loading) pushWidgetSnapshot(value.widgetSnapshot);
