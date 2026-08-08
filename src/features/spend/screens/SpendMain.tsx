@@ -25,6 +25,7 @@ import SpendCategoryCard from "../components/SpendCategoryCard";
 import SpendDailyBarsCard from "../components/SpendDailyBarsCard";
 import SpendNeedsReviewCard from "../components/SpendNeedsReviewCard";
 import SpendMonthPager from "../components/SpendMonthPager";
+import { SpendScreenSkeleton } from "../components/SpendSkeleton";
 
 export default function SpendMain() {
   const insets = useSafeAreaInsets();
@@ -43,6 +44,8 @@ export default function SpendMain() {
     availableMonths,
     getTransactionsForDay,
     dailyBuckets,
+    dataRevision,
+    hydrating,
     actions,
   } = useSpend();
   const { user } = useAuth();
@@ -80,9 +83,16 @@ export default function SpendMain() {
     getTransactionsForDay(activeBucket.date)
       .then(setDayTransactions)
       .catch(() => setDayTransactions([]));
-  }, [activeBucket?.date, getTransactionsForDay, domain.state.transactions.length]);
+    // dataRevision, not a transaction count: recategorising or editing a spend
+    // leaves the count identical, so counting alone left this list showing stale
+    // rows until the app was restarted.
+  }, [activeBucket?.date, getTransactionsForDay, dataRevision]);
 
   const monthName = useMemo(() => spendMonthLabel(selectedMonth), [selectedMonth]);
+
+  // Only stand in for content that genuinely has not arrived. Showing skeletons
+  // over data the user can already read is worse than showing nothing.
+  const showSkeletons = hydrating && domain.state.transactions.length === 0;
 
   // Deep-link routing
   useEffect(() => {
@@ -232,6 +242,8 @@ export default function SpendMain() {
           </Pressable>
         ) : null}
 
+        {showSkeletons ? <SpendScreenSkeleton /> : (
+        <>
         <View style={styles.cardSlot}>
           <SpendTodayHeroCard todayFormatted={widgetSnapshot.todayFormatted} />
         </View>
@@ -282,6 +294,8 @@ export default function SpendMain() {
             />
           </View>
         ) : null}
+        </>
+        )}
       </ScrollView>
 
       {/* FAB */}

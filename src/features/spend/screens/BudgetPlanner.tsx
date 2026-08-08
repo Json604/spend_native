@@ -66,6 +66,7 @@ export default function BudgetPlanner() {
     availableMonths,
   } = useSpend();
   const monthKey = selectedMonth;
+  const monthLabel = spendMonthLabel(monthKey);
   const currentMonth = accountingMonthKey();
   const readOnly = monthKey < currentMonth;
 
@@ -303,6 +304,40 @@ export default function BudgetPlanner() {
     }
   };
 
+  /**
+   * Removing a budget clears it for THIS month only. Archiving the category
+   * instead would take its budget line out of every month, including months
+   * already closed — a past month is a record, not something an edit today
+   * should rewrite. The category itself survives so it can be budgeted again.
+   */
+  const removeFromMonth = () => {
+    if (!editing || savingEdit) return;
+    const option = editing;
+    Alert.alert(
+      `Remove ${option.label}?`,
+      `Its budget will be cleared for ${monthLabel} only. Earlier months keep theirs, and the category stays available.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Remove",
+          style: "destructive",
+          onPress: async () => {
+            setSavingEdit(true);
+            try {
+              await actions.setBudgetAmount(monthKey, option.id, 0, false);
+              knownBudget.current[option.id] = { amountMinor: 0, recurring: false };
+              setEditing(null);
+            } catch (error) {
+              Alert.alert("Couldn't remove", error instanceof Error ? error.message : "Try again.");
+            } finally {
+              setSavingEdit(false);
+            }
+          },
+        },
+      ],
+    );
+  };
+
   const renderItem = ({ item }: { item: ListItem }) => {
     if (item.type === "section") return <Text style={styles.sectionTitle}>{item.label}</Text>;
 
@@ -497,6 +532,13 @@ export default function BudgetPlanner() {
               </View>
             </Pressable>
 
+            {editing && editing.budgetMinor > 0 ? (
+              <Pressable onPress={removeFromMonth} disabled={savingEdit} style={styles.removeRow}>
+                <MaterialCommunityIcons name="trash-can-outline" size={18} color="#FF8A80" />
+                <Text style={styles.removeText}>Remove from {monthLabel}</Text>
+              </Pressable>
+            ) : null}
+
             <View style={styles.modalActions}>
               <Pressable onPress={closeEditor} style={styles.modalButton}>
                 <Text style={styles.modalButtonText}>Cancel</Text>
@@ -565,6 +607,8 @@ const styles = StyleSheet.create({
   sheetGrip: { width: 42, height: 4, borderRadius: 2, backgroundColor: "#6D6048", alignSelf: "center", marginBottom: 18 },
   fieldLabel: { color: "#9C8B5C", fontSize: 11, letterSpacing: 1.4, textTransform: "uppercase", fontWeight: "700", marginTop: 16, marginBottom: 6 },
   recurringToggle: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 20 },
+  removeRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 22, paddingVertical: 6 },
+  removeText: { color: "#FF8A80", fontSize: 14, fontWeight: "500" },
   recurringToggleLabel: { color: "#D8CDB0", fontSize: 15, fontWeight: "600" },
   recurringToggleHint: { color: "#6D6048", fontSize: 12, marginTop: 2 },
   modalAmountRow: {

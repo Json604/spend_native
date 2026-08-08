@@ -15,6 +15,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import MaterialCommunityIcons from "react-native-vector-icons/MaterialCommunityIcons";
 import { useAuth } from "../../../auth/AuthProvider";
 import { syncClient, type SyncReport } from "../../../sync/syncClient";
+import { syncEngine, type SyncEngineState } from "../../../sync/syncEngine";
 import { getSmsPermissionState, type SmsPermissionState } from "../../spend/services/smsIngestion";
 import { useSpend } from "../../spend/store/SpendProvider";
 import type { StackParamList } from "../../../navigation/types";
@@ -33,6 +34,16 @@ function userValue(user: UserRecord | null, keys: string[]): string | null {
 function formatSyncTime(value: string | undefined): string {
   if (!value) return "Not synced yet";
   return new Intl.DateTimeFormat("en-IN", { dateStyle: "medium", timeStyle: "short" }).format(new Date(value));
+}
+
+function relativeTime(epochMillis: number): string {
+  const seconds = Math.round((Date.now() - epochMillis) / 1000);
+  if (seconds < 60) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hr ago`;
+  return `${Math.round(hours / 24)} d ago`;
 }
 
 function friendlyError(error: unknown): string {
@@ -130,24 +141,11 @@ export default function ProfileScreen() {
   const categoryCount = categories.length;
   const transactionCount = domain.summary.transactionCount;
 
-  const syncNow = async () => {
-    if (!user || syncing) return;
-    setSyncing(true);
-    setProfileError(null);
-    try {
-      const report: SyncReport = await syncClient.sync();
-      await refreshDetails();
-      if (report.error) {
-        setProfileError(`Sync could not finish: ${report.error}`);
-      } else {
-        setManualLastSyncedAt(new Date().toISOString());
-      }
-    } catch (error) {
-      setProfileError(`Sync could not finish: ${friendlyError(error)}`);
-    } finally {
-      setSyncing(false);
-    }
-  };
+
+  const [engineState, setEngineState] = useState<SyncEngineState>({
+    running: false, lastSyncedAt: null, lastError: null, pending: 0,
+  });
+  useEffect(() => syncEngine.subscribe(setEngineState), []);
 
   const requestPermission = async () => {
     if (permissionBusy || permission === "granted" || permission === "unavailable") return;
@@ -215,9 +213,27 @@ export default function ProfileScreen() {
 
         <Section title="SYNC">
           <ProfileRow icon="clock-outline" label="Last synced" value={user ? formatSyncTime(lastSyncedAt) : "Not signed in"} />
-          <ProfileRow icon="cloud-upload-outline" label="Pending changes" value={`${pendingCount} waiting to sync`} />
           {deadLetterCount > 0 ? <ProfileRow icon="alert-outline" label="Needs attention" value={`${deadLetterCount} failed change${deadLetterCount === 1 ? "" : "s"}`} /> : null}
-          <ProfileRow icon="sync" label={syncing ? "Syncing…" : "Sync now"} value={user ? "Back up and pull changes" : "Sign in to sync across devices"} onPress={user ? syncNow : accountAction} busy={syncing} />
+          <ProfileRow
+            icon={engineState.lastError ? "cloud-alert" : engineState.running ? "cloud-sync-outline" : "cloud-check-outline"}
+            label={
+              engineState.running
+                ? "Backing up…"
+                : engineState.lastError
+                  ? "Backup paused"
+                  : "Backed up"
+            }
+            value={
+              engineState.lastError
+                ? `${engineState.lastError} — will retry automatically`
+                : engineState.pending > 0
+                  ? `${engineState.pending} change${engineState.pending === 1 ? "" : "s"} queued`
+                  : engineState.lastSyncedAt
+                    ? `Last backed up ${relativeTime(engineState.lastSyncedAt)}`
+                    : "Runs automatically"
+            }
+            busy={engineState.running}
+          />
         </Section>
 
         <Section title="DATA">

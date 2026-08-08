@@ -295,6 +295,15 @@ export type SpendContextType = {
   availableMonths: string[];
   dailyBuckets: SpendDailyBucket[];
   getTransactionsForDay: (dateKey: string) => Promise<SpendTransaction[]>;
+  /**
+   * Increments on every reload. Screens that fetch their own slice of data need
+   * something to depend on that changes whenever anything changed — counting
+   * transactions is not enough, because recategorising one changes no count and
+   * the screen then shows stale rows until the app is restarted.
+   */
+  dataRevision: number;
+  /** True while data is still arriving from the server, so screens can say so. */
+  hydrating: boolean;
   actions: {
     grantSmsAccess: () => Promise<void>;
     refreshSmsInbox: () => Promise<void>;

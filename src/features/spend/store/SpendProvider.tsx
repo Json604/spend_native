@@ -8,7 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { ActivityIndicator, Alert, AppState, DeviceEventEmitter, View } from "react-native";
+import { ActivityIndicator, Alert, AppState, type AppStateStatus, DeviceEventEmitter, View } from "react-native";
 import type {
   CategoryBudgetMap,
   SpendCategoryId,
@@ -41,6 +41,7 @@ import {
 import { consumePendingSmsRefreshFlag } from "../services/smsNativeModule";
 import { useAuth } from "../../../auth/AuthProvider";
 import { syncClient } from "../../../sync/syncClient";
+import { syncEngine } from "../../../sync/syncEngine";
 
 const SpendContext = createContext<SpendContextType | undefined>(undefined);
 
@@ -190,10 +191,26 @@ export function SpendProvider({ children }: { children: ReactNode }) {
   const [availableMonths, setAvailableMonths] = useState<string[]>([accountingMonthKey()]);
   const [loaded, setLoaded] = useState<LoadedSpendData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [dataRevision, setDataRevision] = useState(0);
+  const [hydrating, setHydrating] = useState(false);
   const [syncStates, setSyncStates] = useState(initialSyncStates);
 
   const updateSyncState = useCallback((source: SpendSourceKind, patch: Partial<SpendSyncState>) => {
-    setSyncStates((current) => current.map((item) => item.source === source ? { ...item, ...patch } : item));
+    setSyncStates((current) => {
+      let changed = false;
+      const next = current.map((item) => {
+        if (item.source !== source) return item;
+        const merged = { ...item, ...patch };
+        const differs = (Object.keys(patch) as (keyof SpendSyncState)[]).some((key) => item[key] !== patch[key]);
+        if (!differs) return item;
+        changed = true;
+        return merged;
+      });
+      // Returning a fresh array for an unchanged value would retrigger every
+      // effect that watches sync state — including the one that reloads the
+      // whole month — so an idempotent write has to be a genuine no-op.
+      return changed ? next : current;
+    });
   }, []);
 
   const syncAccount = useCallback(async () => {
@@ -229,6 +246,7 @@ export function SpendProvider({ children }: { children: ReactNode }) {
     ]);
     repository.monthsWithData().then(setAvailableMonths).catch(() => undefined);
     setLoaded(buildLoadedData(monthKey, syncStates, transactions, categories, breakdown, previousBreakdown, summary, review, budget, daily));
+    setDataRevision((revision) => revision + 1);
   }, [repository, selectedMonth, syncStates]);
 
   useEffect(() => {
@@ -253,7 +271,20 @@ export function SpendProvider({ children }: { children: ReactNode }) {
 
   const refreshAfterWrite = useCallback(async () => {
     await reload(selectedMonth);
+    syncEngine.nudge();
   }, [reload, selectedMonth]);
+
+  // Data pulled from the server has to reach the screen on its own. Without
+  // this the rows landed in SQLite and sat there unseen until the app was
+  // killed and reopened, which looks exactly like data loss.
+  const lastSyncSeen = useRef<number | null>(null);
+  useEffect(() => syncEngine.subscribe((state) => {
+    setHydrating(state.running);
+    if (state.lastSyncedAt && state.lastSyncedAt !== lastSyncSeen.current) {
+      lastSyncSeen.current = state.lastSyncedAt;
+      reload(selectedMonth).catch(() => undefined);
+    }
+  }), [reload, selectedMonth]);
 
   const assignReviewCategory = useCallback(async (transactionId: string, categoryLabel: string, opts?: { parentId?: SpendCategoryId }) => {
     const category = await repository.createCategory(categoryLabel, opts);
@@ -356,11 +387,17 @@ export function SpendProvider({ children }: { children: ReactNode }) {
       for (const transaction of convertSmsCandidatesToTransactions(snapshot.parsedCandidates)) {
         await repository.createTransaction(transaction);
       }
-      updateSyncState("sms", {
-        status: snapshot.permission === "granted" ? "ready" : "needs_permission",
-        detail: snapshot.parsedCandidates.length ? `Today: ${snapshot.parsedCandidates.length} SMS transactions.` : "No transaction SMS found for today yet.",
-        lastSyncedAt: new Date(Date.now()).toISOString(),
-      });
+      // An ingest attempt reports what it INGESTED. Whether permission is
+      // granted is the permission watcher's business — letting this path also
+      // write "needs_permission" is what left the banner up after the user had
+      // already said yes.
+      if (snapshot.permission === "granted") {
+        updateSyncState("sms", {
+          status: "ready",
+          detail: snapshot.parsedCandidates.length ? `Today: ${snapshot.parsedCandidates.length} SMS transactions.` : "No transaction SMS found for today yet.",
+          lastSyncedAt: new Date(Date.now()).toISOString(),
+        });
+      }
       await refreshAfterWrite();
     } catch (error) {
       updateSyncState("sms", { status: "error", detail: error instanceof Error ? error.message : "SMS sync failed." });
@@ -375,6 +412,34 @@ export function SpendProvider({ children }: { children: ReactNode }) {
     updateSyncState("sms", { status: permission === "granted" ? "ready" : "needs_permission", detail: permission === "granted" ? "SMS access granted." : "SMS access is still required." });
     if (permission === "granted") await refreshSmsInbox();
   }, [refreshSmsInbox, updateSyncState]);
+
+  /**
+   * The permission banner follows the ACTUAL permission, re-checked whenever
+   * the app comes forward.
+   *
+   * It used to be written only as a side effect of an ingest attempt, so a
+   * check that ran while the system dialog was still on screen recorded
+   * "denied" — and nothing ever looked again. The user granted access and the
+   * banner kept asking for it.
+   */
+  useEffect(() => {
+    if (loading) return;
+    let cancelled = false;
+    const syncPermissionState = async () => {
+      const permission = await getSmsPermissionState();
+      if (cancelled) return;
+      if (permission === "unavailable") return;
+      updateSyncState("sms", {
+        status: permission === "granted" ? "ready" : "needs_permission",
+        ...(permission === "granted" ? {} : { detail: "SMS access is required to capture bank alerts." }),
+      });
+    };
+    void syncPermissionState();
+    const subscription = AppState.addEventListener("change", (state: AppStateStatus) => {
+      if (state === "active") void syncPermissionState();
+    });
+    return () => { cancelled = true; subscription.remove(); };
+  }, [loading, updateSyncState]);
 
   useEffect(() => {
     if (loading) return;
@@ -422,6 +487,8 @@ export function SpendProvider({ children }: { children: ReactNode }) {
       availableMonths,
       dailyBuckets: data.dailyBuckets,
       getTransactionsForDay,
+      dataRevision,
+      hydrating,
       actions: {
         grantSmsAccess,
         refreshSmsInbox,
@@ -442,7 +509,7 @@ export function SpendProvider({ children }: { children: ReactNode }) {
         clearMonthBudget,
       },
     };
-  }, [loaded, repository, selectedMonth, syncStates, grantSmsAccess, refreshSmsInbox, assignReviewCategory, assignCategory, ignoreTransaction, addManualTransaction, setTransactionPlanType, setPlanType, setBudgetAmount, carryForwardBudget, createCategory, renameCategory, archiveCategory, setBudget, clearMonthBudget]);
+  }, [loaded, dataRevision, hydrating, repository, selectedMonth, syncStates, grantSmsAccess, refreshSmsInbox, assignReviewCategory, assignCategory, ignoreTransaction, addManualTransaction, setTransactionPlanType, setPlanType, setBudgetAmount, carryForwardBudget, createCategory, renameCategory, archiveCategory, setBudget, clearMonthBudget]);
 
   useEffect(() => {
     if (!loading) pushWidgetSnapshot(value.widgetSnapshot);
