@@ -338,6 +338,41 @@ export default function BudgetPlanner() {
     );
   };
 
+  /**
+   * Deleting the category itself, everywhere. Kept separate from the per-month
+   * remove above and worded plainly, because the server cascades a category
+   * delete to its budget lines and allocations in EVERY month — including
+   * closed ones. That is occasionally what the user wants (a typo, a category
+   * they never used) and never what they want by accident.
+   */
+  const deleteCategoryEverywhere = () => {
+    if (!editing || savingEdit) return;
+    const option = editing;
+    const spent = option.spentMinor > 0 ? ` It has ${spendCurrency(option.spentMinor)} of spending this month, which will become uncategorised.` : "";
+    Alert.alert(
+      `Delete ${option.label} entirely?`,
+      `This removes the category and its budget from every month, including past ones.${spent} To clear it for ${monthLabel} alone, use "Remove from ${monthLabel}" instead.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete everywhere",
+          style: "destructive",
+          onPress: async () => {
+            setSavingEdit(true);
+            try {
+              await actions.archiveCategory(option.id);
+              setEditing(null);
+            } catch (error) {
+              Alert.alert("Couldn't delete", error instanceof Error ? error.message : "Try again.");
+            } finally {
+              setSavingEdit(false);
+            }
+          },
+        },
+      ],
+    );
+  };
+
   const renderItem = ({ item }: { item: ListItem }) => {
     if (item.type === "section") return <Text style={styles.sectionTitle}>{item.label}</Text>;
 
@@ -534,10 +569,21 @@ export default function BudgetPlanner() {
 
             {editing && editing.budgetMinor > 0 ? (
               <Pressable onPress={removeFromMonth} disabled={savingEdit} style={styles.removeRow}>
-                <MaterialCommunityIcons name="trash-can-outline" size={18} color="#FF8A80" />
-                <Text style={styles.removeText}>Remove from {monthLabel}</Text>
+                <MaterialCommunityIcons name="calendar-remove-outline" size={18} color="#FFB74D" />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.removeText}>Remove from {monthLabel}</Text>
+                  <Text style={styles.removeHint}>Clears this month's budget. Other months keep theirs.</Text>
+                </View>
               </Pressable>
             ) : null}
+
+            <Pressable onPress={deleteCategoryEverywhere} disabled={savingEdit} style={styles.removeRow}>
+              <MaterialCommunityIcons name="trash-can-outline" size={18} color="#FF8A80" />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.deleteText}>Delete category</Text>
+                <Text style={styles.removeHint}>Removes it from every month, including past ones.</Text>
+              </View>
+            </Pressable>
 
             <View style={styles.modalActions}>
               <Pressable onPress={closeEditor} style={styles.modalButton}>
@@ -608,7 +654,9 @@ const styles = StyleSheet.create({
   fieldLabel: { color: "#9C8B5C", fontSize: 11, letterSpacing: 1.4, textTransform: "uppercase", fontWeight: "700", marginTop: 16, marginBottom: 6 },
   recurringToggle: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 20 },
   removeRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 22, paddingVertical: 6 },
-  removeText: { color: "#FF8A80", fontSize: 14, fontWeight: "500" },
+  removeText: { color: "#FFB74D", fontSize: 14, fontWeight: "500" },
+  deleteText: { color: "#FF8A80", fontSize: 14, fontWeight: "500" },
+  removeHint: { color: "rgba(255,255,255,0.45)", fontSize: 12, marginTop: 2 },
   recurringToggleLabel: { color: "#D8CDB0", fontSize: 15, fontWeight: "600" },
   recurringToggleHint: { color: "#6D6048", fontSize: 12, marginTop: 2 },
   modalAmountRow: {
