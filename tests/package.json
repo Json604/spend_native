@@ -1,5 +1,5 @@
 {
   "private": true,
   "type": "module",
-  "main": "parser.test.mjs"
+  "main": "all.test.mjs"
 }

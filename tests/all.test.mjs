@@ -1,0 +1,4 @@
+// `node --test tests/` resolves this package entry point. Keep the explicit
+// imports so that command remains the single full-suite invocation.
+await import('./parser.test.mjs');
+await import('./coordinator.test.mjs');
