@@ -13,8 +13,6 @@ import {
 
 const PRIMARY_IDENTITY = 'aae9e2e8-943a-494d-b1e3-52e7d5a04eef';
 const SOURCE_SYSTEM = 'spend_backup';
-const EXPECTED_ACTIVE_DEBITS = 178;
-const EXPECTED_ACTIVE_DEBIT_TOTAL = 6_751_207;
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const exportDir = resolve(process.argv[2] ?? '/Users/arka/Desktop/spend_backup');
@@ -177,12 +175,39 @@ const input = Object.fromEntries(
 );
 const importTimestamp = Date.now();
 
-const exportedCategoryIds = new Set(
+const primaryCategoryIds = new Set(
   input.spend_categories
     .filter(isRecord)
+    .filter((row) => row.user_id === PRIMARY_IDENTITY)
     .map((row) => row.id)
     .filter((id) => typeof id === 'string' && id !== ''),
 );
+
+const expectedPrimaryActiveDebits = input.spend_transactions.reduce(
+  (expectation, row) => {
+    if (
+      !isRecord(row) ||
+      row.user_id !== PRIMARY_IDENTITY ||
+      row.direction !== 'debit' ||
+      row.status !== 'posted'
+    ) {
+      return expectation;
+    }
+
+    expectation.count += 1;
+    expectation.total += safeInteger(row.amount_minor, 'amount_minor');
+    return expectation;
+  },
+  { count: 0, total: 0 },
+);
+
+const expectedPrimaryBudgetTotals = new Map();
+for (const row of input.spend_monthly_budgets) {
+  if (!isRecord(row) || row.user_id !== PRIMARY_IDENTITY) continue;
+  const monthKey = validateMonthKey(row.month_key);
+  const amountMinor = safeInteger(row.amount_minor, 'amount_minor');
+  expectedPrimaryBudgetTotals.set(monthKey, amountMinor);
+}
 
 function archivedCategoryLabel(categoryId) {
   return categoryId
@@ -293,7 +318,6 @@ try {
   `);
 
   const sourceImported = Object.fromEntries(Object.keys(sourceFiles).map((name) => [name, 0]));
-  const legacyParentTotals = new Map();
   const categoryIdMap = new Map();
   const categoryCandidates = [];
 
@@ -614,7 +638,6 @@ try {
         const monthKey = validateMonthKey(row.month_key);
         const amountMinor = safeInteger(row.amount_minor, 'amount_minor');
         epochMilliseconds(row.updated_at, 'updated_at');
-        legacyParentTotals.set(monthKey, amountMinor);
         // v1 intentionally has category budgets only. Inventing a synthetic category
         // would change the meaning of an overall monthly cap, so preserve it verbatim.
         quarantine(tableName, row, index, 'overall monthly budget has no lossless v1 mapping');
@@ -651,7 +674,7 @@ try {
         const updatedAt = epochMilliseconds(row.updated_at, 'updated_at');
         const categoryId = categoryIdMap.get(legacyCategoryId) ?? legacyCategoryId;
 
-        if (!exportedCategoryIds.has(legacyCategoryId)) {
+        if (!primaryCategoryIds.has(legacyCategoryId)) {
           // Archived categories stay out of category pickers, while their historical
           // budgets remain joinable and render with the recovered category label.
           insertArchivedCategory.run(
@@ -831,13 +854,13 @@ try {
     WHERE month_key = ?
   `);
   let budgetsReconcile = true;
-  for (const [monthKey, legacyParentTotal] of [...legacyParentTotals].sort()) {
+  for (const [monthKey, expectedBudgetTotal] of [...expectedPrimaryBudgetTotals].sort()) {
     const categoryBudgetTotal = Number(getBudgetTotal.get(monthKey).total);
-    const status = categoryBudgetTotal === legacyParentTotal ? 'PASS' : 'MISMATCH';
+    const status = categoryBudgetTotal === expectedBudgetTotal ? 'PASS' : 'MISMATCH';
     console.log(
-      `  ${monthKey}: ${status} (category sum ${categoryBudgetTotal}; legacy parent ${legacyParentTotal})`,
+      `  ${monthKey}: ${status} (category sum ${categoryBudgetTotal}; source parent ${expectedBudgetTotal})`,
     );
-    budgetsReconcile &&= categoryBudgetTotal === legacyParentTotal;
+    budgetsReconcile &&= categoryBudgetTotal === expectedBudgetTotal;
   }
   if (!budgetsReconcile) process.exitCode = 1;
 
@@ -859,11 +882,16 @@ try {
     `Primary active debits: ${debitCount} rows totaling ${debitTotal} minor units`,
   );
 
-  if (debitCount === EXPECTED_ACTIVE_DEBITS && debitTotal === EXPECTED_ACTIVE_DEBIT_TOTAL) {
-    console.log('PASS: primary active-debit reconciliation matches 178 / 6751207.');
+  if (
+    debitCount === expectedPrimaryActiveDebits.count &&
+    debitTotal === expectedPrimaryActiveDebits.total
+  ) {
+    console.log(
+      `PASS: primary active-debit reconciliation matches source-derived ${expectedPrimaryActiveDebits.count} / ${expectedPrimaryActiveDebits.total}.`,
+    );
   } else {
     console.error(
-      `!!! FAIL: PRIMARY RECONCILIATION FAILED — expected ${EXPECTED_ACTIVE_DEBITS} / ${EXPECTED_ACTIVE_DEBIT_TOTAL}, got ${debitCount} / ${debitTotal} !!!`,
+      `!!! FAIL: PRIMARY RECONCILIATION FAILED — source expected ${expectedPrimaryActiveDebits.count} / ${expectedPrimaryActiveDebits.total}, got ${debitCount} / ${debitTotal} !!!`,
     );
     process.exitCode = 1;
   }
