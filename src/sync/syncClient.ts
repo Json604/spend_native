@@ -18,9 +18,13 @@ type OutboxRow = {
   created_at: number;
 };
 
-type SyncOperation = Record<string, unknown>;
+import { nextPullCursor, normalizeRemoteCommand, parsePayload, type SyncOperation } from "./wireCommands";
+
+type LocalSyncOperation = SyncOperation;
 type PushResponse = { applied?: unknown[]; conflicts?: unknown[] };
-type PullResponse = { ops?: SyncOperation[]; cursor?: string };
+// The server assigns cursors as numbers; JSON delivers them as such. Typing
+// this as `string` is what hid the bug that froze the cursor.
+type PullResponse = { ops?: SyncOperation[]; cursor?: string | number };
 
 export type SyncReport = {
   pushed: number;
@@ -56,7 +60,6 @@ export class SpendSyncClient {
       "SELECT value FROM sync_metadata WHERE key = 'owner_id'",
     );
     const userId = sessionRows[0]?.value;
-    console.log("[sync] owner_id =", userId ?? "(none — sync will no-op)");
     if (!userId) return { pushed: 0, pulled: 0, deadLetterCount: await this.deadLetterCount() };
 
     let pushed = 0;
@@ -78,6 +81,73 @@ export class SpendSyncClient {
       deadLetterCount: await this.deadLetterCount(),
       ...(lastError ? { error: lastError } : {}),
     };
+  }
+
+  /**
+   * Push EVERY local row, not just what happens to be queued.
+   *
+   * The outbox only carries changes made since the last successful drain, so
+   * once it empties the server can never catch up on anything it missed — a
+   * failed sync, a server-side edit, a migration that diverged. That makes the
+   * backup silently incomplete, which is worse than no backup because it looks
+   * fine. This walks the local database and sends the current state, letting
+   * the device be the source of truth it actually is.
+   *
+   * Safe to run repeatedly: op ids are derived from the row id, so the server's
+   * idempotency turns a repeat into a no-op rather than a duplicate.
+   */
+  async backUpEverything(): Promise<{ sent: number; error?: string }> {
+    const sessionRows = await nativeCoordinator.query<{ value: string }>(
+      "SELECT value FROM sync_metadata WHERE key = 'owner_id'",
+    );
+    if (!sessionRows[0]?.value) return { sent: 0, error: "Sign in first" };
+    const deviceId = await secureDeviceId();
+
+    const sources: { entity: string; sql: string; toFields: (row: Record<string, unknown>) => Record<string, unknown> }[] = [
+      {
+        entity: "categories",
+        sql: "SELECT id, label, tint, parent_id, is_system, catalog_version FROM categories WHERE deleted_at IS NULL",
+        toFields: (row) => ({
+          categoryId: row.id, label: row.label, tint: row.tint,
+          parentId: row.parent_id, isSystem: !!row.is_system, catalogVersion: row.catalog_version,
+        }),
+      },
+      {
+        entity: "budgets",
+        sql: "SELECT month_key, category_id, amount_minor, recurring FROM budgets",
+        toFields: (row) => ({
+          monthKey: row.month_key, categoryId: row.category_id,
+          amountMinor: row.amount_minor, recurring: !!row.recurring,
+        }),
+      },
+    ];
+
+    let sent = 0;
+    try {
+      for (const source of sources) {
+        const rows = await nativeCoordinator.query<Record<string, unknown>>(source.sql);
+        for (let index = 0; index < rows.length; index += BATCH_SIZE) {
+          const slice = rows.slice(index, index + BATCH_SIZE);
+          const operations = slice.map((row) => {
+            const entityId = source.entity === "budgets"
+              ? `${String(row.month_key)}:${String(row.category_id)}`
+              : String(row.id);
+            return {
+              opId: deterministicOpId(source.entity, entityId),
+              entity: source.entity,
+              entityId,
+              action: "upsert",
+              fields: source.toFields(row),
+            };
+          });
+          await this.push(operations, deviceId);
+          sent += operations.length;
+        }
+      }
+      return { sent };
+    } catch (error) {
+      return { sent, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   private async drainOutbox(deviceId: string): Promise<number> {
@@ -136,18 +206,10 @@ export class SpendSyncClient {
       const response = await authenticatedFetch(`/v1/sync/pull?since=${encodeURIComponent(cursor)}`);
       if (!response.ok) throw new Error(`Sync pull failed (${response.status})`);
       const body = (await response.json()) as PullResponse;
-      const nextCursor = typeof body.cursor === "string" ? body.cursor : cursor;
+      const nextCursor = nextPullCursor(body.cursor, cursor);
       const ops = body.ops ?? [];
       const commands = ops.map(normalizeRemoteCommand).map((command) => JSON.stringify(command));
-      console.log("[sync] pulled", ops.length, "ops; first =", JSON.stringify(ops[0] ?? null).slice(0, 260));
-      console.log("[sync] normalized first command =", commands[0]?.slice(0, 260) ?? "(none)");
-      try {
-        await nativeSync.applyPulledOps(JSON.stringify(commands), nextCursor, userId);
-        console.log("[sync] applied", commands.length, "commands, cursor ->", nextCursor);
-      } catch (applyError) {
-        console.log("[sync] APPLY FAILED:", applyError instanceof Error ? applyError.message : String(applyError));
-        throw applyError;
-      }
+      await nativeSync.applyPulledOps(JSON.stringify(commands), nextCursor, userId);
       total += ops.length;
       if (ops.length === 0 || nextCursor === cursor) return total;
       cursor = nextCursor;
@@ -159,17 +221,34 @@ export class SpendSyncClient {
     const rows = await nativeCoordinator.query<{ value: string }>(
       "SELECT value FROM sync_metadata WHERE key = 'pull_cursor'",
     );
-    return rows[0]?.value ?? "";
+    const stored = rows[0]?.value;
+    return stored && stored !== "" ? stored : "0";
   }
 }
 
-function parsePayload(value: string): unknown {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return value;
+/**
+ * A UUID derived from the entity id, so re-running a full backup produces the
+ * SAME op ids and the server's idempotency collapses repeats into no-ops.
+ */
+function deterministicOpId(entity: string, entityId: string): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x01000193;
+  const input = `${entity}:${entityId}`;
+  for (let index = 0; index < input.length; index += 1) {
+    h1 = Math.imul(h1 ^ input.charCodeAt(index), 16777619) >>> 0;
+    h2 = Math.imul(h2 + input.charCodeAt(index), 2246822519) >>> 0;
   }
+  const hex = (value: number) => value.toString(16).padStart(8, "0");
+  const raw = `${hex(h1)}${hex(h2)}${hex(h1 ^ h2)}${hex((h1 + h2) >>> 0)}`;
+  return [
+    raw.slice(0, 8),
+    raw.slice(8, 12),
+    `5${raw.slice(13, 16)}`,
+    `${"89ab"[h1 & 3]}${raw.slice(17, 20)}`,
+    raw.slice(20, 32),
+  ].join("-");
 }
+
 
 function toServerOperation(row: OutboxRow): SyncOperation {
   const command = parsePayload(row.payload);
@@ -188,7 +267,11 @@ function toServerOperation(row: OutboxRow): SyncOperation {
     opId: row.id,
     entity: row.table_name,
     entityId: row.row_id,
-    action: "upsert",
+    // Archiving is a DELETE upstream. This was hardcoded to "upsert", so the
+    // server never learned a category had been archived: it kept the row live
+    // and the next pull dutifully restored it. Categories the user had deleted
+    // kept coming back and reappearing in the budget list.
+    action: commandRecord?.kind === "archiveCategory" ? "delete" : "upsert",
     fields,
     ...(typeof commandRecord?.payload === "object" && commandRecord.payload &&
     typeof (commandRecord.payload as Record<string, unknown>).source === "string"
@@ -216,37 +299,5 @@ function idsFromResponse(values: unknown[] | undefined): Set<string> {
   return ids;
 }
 
-function normalizeRemoteCommand(operation: SyncOperation): Record<string, unknown> {
-  const rawPayload = operation.payload;
-  const payload = typeof rawPayload === "string" ? parsePayload(rawPayload) : rawPayload;
-  if (payload && typeof payload === "object" && typeof (payload as Record<string, unknown>).kind === "string") {
-    // Server ops carry the command under `fields` with an `opId`, which is the
-    // wire shape. The coordinator expects `payload` with a `commandId`, so
-    // translate rather than passing it through — otherwise every pulled command
-    // fails to parse and the whole batch aborts.
-    const remote = payload as Record<string, unknown>;
-    const fields = remote.fields;
-    const normalized: Record<string, unknown> = {
-      kind: remote.kind,
-      commandId: remote.commandId ?? remote.opId ?? operation.op_id ?? operation.opId,
-      payload: remote.payload ?? (fields && typeof fields === "object" ? fields : {}),
-    };
-    // expectedRevision is deliberately omitted for pulled ops. The server is
-    // authoritative for what it sends, and it has no view of this device's local
-    // revision; carrying a stale expectation would reject legitimate remote
-    // state. Local edits are still protected by the manual-provenance rule.
-    if (typeof remote.expectedRevision === "number") {
-      normalized.expectedRevision = remote.expectedRevision;
-    }
-    return normalized;
-  }
-  const inner = payload && typeof payload === "object" ? payload as Record<string, unknown> : {};
-  return {
-    commandId: operation.id ?? operation.opId,
-    kind: operation.op,
-    ...(typeof inner.expectedRevision === "number" ? { expectedRevision: inner.expectedRevision } : {}),
-    payload: inner.payload ?? inner,
-  };
-}
 
 export const syncClient = new SpendSyncClient();

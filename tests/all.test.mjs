@@ -2,3 +2,4 @@
 // imports so that command remains the single full-suite invocation.
 await import('./parser.test.mjs');
 await import('./coordinator.test.mjs');
+await import('./wireCommands.test.mjs');

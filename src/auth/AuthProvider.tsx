@@ -2,6 +2,7 @@ import { createContext, ReactNode, useCallback, useContext, useEffect, useMemo, 
 import { signInWithGoogle, restoreAuthSession, signOut as signOutAuth, type AuthSession, type AuthUser } from "./authClient";
 import { secureDeviceId } from "./secureTokenStore";
 import { nativeSync } from "../sync/nativeSync";
+import { syncEngine } from "../sync/syncEngine";
 
 type AuthContextValue = {
   loading: boolean;
@@ -60,9 +61,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [claim]);
 
   const signOut = useCallback(async () => {
+    syncEngine.stop();
     await signOutAuth();
     setSession(null);
   }, []);
+
+  // Sync starts itself the moment the device knows who it belongs to, and stops
+  // on sign-out. Nothing about replication is the user's job.
+  useEffect(() => {
+    if (session?.user?.id) syncEngine.start(session.user.id);
+    else syncEngine.stop();
+  }, [session?.user?.id]);
 
   const value = useMemo(() => ({ loading, user: session?.user ?? null, session, signIn, signOut }), [loading, session, signIn, signOut]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
