@@ -24,6 +24,7 @@ import type {
 } from "../types/types";
 import {
   accountingMonthKey,
+  currentAccountingDateKey,
   previousAccountingMonthKey,
   spendCurrency,
   spendMonthLabel,
@@ -63,6 +64,8 @@ const initialSyncStates: SpendSyncState[] = [
 ];
 
 type LoadedSpendData = {
+  /** Which month this snapshot describes, so a stale one can be recognised. */
+  monthKey: string;
   state: SpendDomainState;
   domain: SpendRepositorySnapshot;
   summary: SpendContextType["summary"];
@@ -156,6 +159,18 @@ function buildLoadedData(
       : "Refresh SMS to build your month.",
     syncLabel: syncStates.find((item) => item.status === "ready")?.label ?? "Awaiting first sync",
   };
+  const todayKey = currentAccountingDateKey();
+  const todaySpends = transactions
+    .filter((transaction) =>
+      transaction.direction === "debit" &&
+      transaction.status !== "ignored" &&
+      currentAccountingDateKey(Date.parse(transaction.occurredAt)) === todayKey)
+    .sort((left, right) => Date.parse(right.occurredAt) - Date.parse(left.occurredAt))
+    .slice(0, 8)
+    .map((transaction) => ({
+      label: transaction.merchantName || "Unknown payee",
+      amountLabel: spendCurrency(transaction.amountMinor),
+    }));
   const widgetSnapshot = {
     monthLabel: summaryBase.monthLabel,
     totalFormatted: summary.totalFormatted,
@@ -164,11 +179,13 @@ function buildLoadedData(
     monthTotalCaption: `${summaryBase.monthLabel} · ${summary.totalFormatted}`,
     syncLabel: summary.syncLabel,
     topCategories: categoriesPreview.slice(0, 4).map((category) => ({ label: category.label, amountLabel: category.amountLabel, spentMinor: category.spentMinor, budgetMinor: category.budgetMinor })),
+    todaySpends,
     monthBudgetMinor: budget?.amountMinor ?? null,
     monthSpentMinor: summaryBase.totalMinor,
     daysRemainingInMonth: summaryRow.daysRemaining,
   };
   return {
+    monthKey,
     state: domain.state,
     domain,
     summary,
@@ -498,7 +515,10 @@ export function SpendProvider({ children }: { children: ReactNode }) {
       dailyBuckets: data.dailyBuckets,
       getTransactionsForDay,
       dataRevision,
-      hydrating,
+      // Switching months re-reads everything, and until it lands the screen is
+      // showing the PREVIOUS month's numbers under the new month's name. That
+      // is the moment a skeleton is actually for.
+      hydrating: hydrating || !loaded || loaded.monthKey !== selectedMonth,
       actions: {
         grantSmsAccess,
         refreshSmsInbox,

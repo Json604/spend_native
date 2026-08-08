@@ -41,7 +41,9 @@ class SpendWidgetCategoriesService : RemoteViewsService() {
                 out.add(PillRow(label = "Set $monthName budget →"))
             }
 
-            out.addAll(s.topCategories)
+            // Today's spends, not the month's category totals: the widget answers
+            // "what have I spent today", which is the question a home screen is for.
+            out.addAll(s.todaySpends)
             rows = out
         }
 

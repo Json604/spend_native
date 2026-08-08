@@ -87,6 +87,11 @@ export type SpendWidgetSnapshot = {
   monthTotalCaption: string;
   syncLabel: string;
   topCategories: SpendWidgetCategory[];
+  /**
+   * Today's individual spends, newest first — what the widget lists. The month's
+   * category totals are a different question and belong on the month screen.
+   */
+  todaySpends: { label: string; amountLabel: string }[];
   monthBudgetMinor: number | null;
   monthSpentMinor: number;
   daysRemainingInMonth: number;

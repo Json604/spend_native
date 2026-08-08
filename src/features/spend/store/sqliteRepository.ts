@@ -27,7 +27,7 @@ const numberValue = (value: unknown): number =>
 
 const stringValue = (value: unknown): string => String(value ?? "");
 
-function currentAccountingDateKey(epochMillis = Date.now()): string {
+export function currentAccountingDateKey(epochMillis = Date.now()): string {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: ACCOUNTING_TIME_ZONE,
     year: "numeric",

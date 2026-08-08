@@ -25,7 +25,21 @@ object SpendWidgetStorage {
         val monthBudgetMinor: Int?,
         val daysRemainingInMonth: Int,
         val topCategories: List<CategoryRow>,
+        /** Today's individual spends — what the widget lists. */
+        val todaySpends: List<CategoryRow>,
     )
+
+    /**
+     * Midnight in the accounting timezone (IST), not UTC. `now - now % 86400000`
+     * is UTC midnight, which between 00:00 and 05:30 IST lands on the PREVIOUS
+     * day — the widget would show yesterday's spending as today's every night.
+     */
+    private const val IST_OFFSET_MILLIS = 5L * 60 * 60 * 1000 + 30L * 60 * 1000
+
+    private fun startOfAccountingDay(now: Long): Long {
+        val shifted = now + IST_OFFSET_MILLIS
+        return shifted - (shifted % (24L * 60 * 60 * 1000)) - IST_OFFSET_MILLIS
+    }
 
     fun readSnapshot(context: Context): Snapshot {
         val raw = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -45,7 +59,7 @@ object SpendWidgetStorage {
     fun refreshFromDatabase(context: Context, coordinator: SpendCoordinator) {
         val now = System.currentTimeMillis()
         val monthKey = SimpleDateFormat("yyyy-MM", Locale.ROOT).format(Date(now))
-        val dayStart = now - (now % (24L * 60 * 60 * 1000))
+        val dayStart = startOfAccountingDay(now)
         val monthStart = SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).parse("$monthKey-01")!!.time
         val previous = readSnapshot(context)
         fun debitTotal(from: Long): Long = coordinator.query(
@@ -58,6 +72,21 @@ object SpendWidgetStorage {
                 rows.put(JSONObject().put("label", row.label).put("amountLabel", row.amountLabel))
             }
         }
+        // Read today's spends straight from the database rather than carrying the
+        // previous snapshot forward: this path runs when an SMS arrives with no
+        // JS VM alive, which is exactly when a new spend needs to appear.
+        val todaySpends = org.json.JSONArray().also { rows ->
+            coordinator.query(
+                """SELECT merchant_name, amount_minor FROM transactions
+                   WHERE direction = 'debit' AND status = 'posted' AND occurred_at >= ?
+                   ORDER BY occurred_at DESC LIMIT 8""",
+                arrayOf(dayStart.toString()),
+            ).forEach { row ->
+                val label = (row["merchant_name"] as? String)?.takeIf { it.isNotBlank() } ?: "Unknown payee"
+                val minor = (row["amount_minor"] as? Long) ?: 0L
+                rows.put(JSONObject().put("label", label).put("amountLabel", "₹${formatAmount(minor)}"))
+            }
+        }
         val json = JSONObject()
             .put("monthLabel", SimpleDateFormat("MMMM yyyy", Locale.getDefault()).format(Date(now)))
             .put("todayFormatted", "₹${formatAmount(debitTotal(dayStart))}")
@@ -65,6 +94,7 @@ object SpendWidgetStorage {
             .put("monthBudgetMinor", previous.monthBudgetMinor ?: JSONObject.NULL)
             .put("daysRemainingInMonth", previous.daysRemainingInMonth)
             .put("topCategories", categories)
+            .put("todaySpends", todaySpends)
         writeSnapshotJson(context, json.toString())
     }
 
@@ -75,13 +105,17 @@ object SpendWidgetStorage {
     }
 
     private fun parseSnapshot(json: JSONObject): Snapshot {
-        val cats = mutableListOf<CategoryRow>()
-        json.optJSONArray("topCategories")?.let { arr ->
-            for (i in 0 until arr.length()) {
-                val o = arr.getJSONObject(i)
-                cats.add(CategoryRow(o.optString("label"), o.optString("amountLabel")))
+        fun rowsAt(key: String): List<CategoryRow> {
+            val out = mutableListOf<CategoryRow>()
+            json.optJSONArray(key)?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    out.add(CategoryRow(o.optString("label"), o.optString("amountLabel")))
+                }
             }
+            return out
         }
+        val cats = rowsAt("topCategories")
         return Snapshot(
             monthLabel = json.optString("monthLabel", "This month"),
             todayFormatted = json.optString("todayFormatted", "₹0"),
@@ -89,11 +123,12 @@ object SpendWidgetStorage {
             monthBudgetMinor = if (json.isNull("monthBudgetMinor")) null else json.optInt("monthBudgetMinor"),
             daysRemainingInMonth = json.optInt("daysRemainingInMonth", 0),
             topCategories = cats,
+            todaySpends = rowsAt("todaySpends"),
         )
     }
 
     private fun placeholder(): Snapshot {
         val monthLabel = SimpleDateFormat("MMMM yyyy", Locale.getDefault()).format(Date())
-        return Snapshot(monthLabel, "₹0", 0, null, 0, emptyList())
+        return Snapshot(monthLabel, "₹0", 0, null, 0, emptyList(), emptyList())
     }
 }
