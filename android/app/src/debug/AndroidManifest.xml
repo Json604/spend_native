@@ -3,5 +3,18 @@
 
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW"/>
 
-    <application android:usesCleartextTraffic="true" tools:targetApi="28" tools:ignore="GoogleAppIndexingWarning" tools:replace="android:usesCleartextTraffic" />
+    <permission
+        android:name="com.lym.spend.permission.DEBUG_SMS_INJECT"
+        android:protectionLevel="signature" />
+
+    <application android:usesCleartextTraffic="true" tools:targetApi="28" tools:ignore="GoogleAppIndexingWarning" tools:replace="android:usesCleartextTraffic">
+        <receiver
+            android:name=".debug.DebugSmsInjectReceiver"
+            android:exported="false"
+            android:permission="com.lym.spend.permission.DEBUG_SMS_INJECT">
+            <intent-filter>
+                <action android:name="com.lym.spend.debug.INJECT_SMS" />
+            </intent-filter>
+        </receiver>
+    </application>
 </manifest>

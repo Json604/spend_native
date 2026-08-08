@@ -5,6 +5,8 @@ import android.content.ContextWrapper
 import android.database.sqlite.SQLiteDatabase
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.lym.spend.sms.SmsIngestInput
+import com.lym.spend.sms.SpendSmsIngestor
 import java.io.File
 import java.lang.reflect.InvocationTargetException
 import java.util.Collections
@@ -236,6 +238,120 @@ class SpendCoordinatorTest {
 
     val count = coordinator.query("SELECT count(*) AS count FROM categories").single()["count"]
     assertEquals(commandCount.toLong(), count)
+  }
+
+  @Test
+  fun ingestingIndianUpiDebitWritesOneAlertAndOneTransaction() = withFreshDatabase { coordinator ->
+    SpendSmsIngestor.ingest(
+      testContext(),
+      coordinator,
+      SmsIngestInput(
+        sender = "KOTAKB",
+        body = "Sent Rs.48.00 from XXXXXX1234 to RAHUL SHARMA on 01/06/2026. UPI ref no. 651805890728.",
+        timestamp = 1_780_272_000_000L,
+        subscriptionId = 1,
+        providerMessageId = "provider-upi-48",
+      ),
+    )
+
+    val state = coordinator.query(
+      """SELECT
+           (SELECT count(*) FROM source_alerts) alerts,
+           (SELECT count(*) FROM transactions) transactions,
+           (SELECT amount_minor FROM transactions) amount,
+           (SELECT direction FROM transactions) direction""",
+    ).single()
+    assertEquals(1L, state["alerts"])
+    assertEquals(1L, state["transactions"])
+    assertEquals(4_800L, state["amount"])
+    assertEquals("debit", state["direction"])
+  }
+
+  @Test
+  fun marketingCreditCardOfferIsRetainedButDoesNotCreatePhantomTransaction() = withFreshDatabase { coordinator ->
+    SpendSmsIngestor.ingest(
+      testContext(),
+      coordinator,
+      SmsIngestInput(
+        sender = "KOTAK",
+        body = "Get upto 8 PVR INOX tickets on Lifetime Free pre-approved Kotak League Credit Card. Limit Rs. 90000",
+        timestamp = 1_780_272_000_000L,
+        subscriptionId = 1,
+        providerMessageId = "provider-kotak-offer",
+      ),
+    )
+
+    val state = coordinator.query(
+      """SELECT
+           (SELECT count(*) FROM source_alerts) alerts,
+           (SELECT parse_status FROM source_alerts) parse_status,
+           (SELECT count(*) FROM transactions) transactions""",
+    ).single()
+    assertEquals(1L, state["alerts"])
+    assertEquals("non_transaction_marketing", state["parse_status"])
+    assertEquals(0L, state["transactions"])
+  }
+
+  @Test
+  fun availableBalanceIsNotUsedAsTheDebitAmount() = withFreshDatabase { coordinator ->
+    SpendSmsIngestor.ingest(
+      testContext(),
+      coordinator,
+      SmsIngestInput(
+        sender = "HDFCBK",
+        body = "Avl Bal Rs.12,345 in A/c X1234 after debit of Rs.500.",
+        timestamp = 1_780_272_000_000L,
+        subscriptionId = 1,
+        providerMessageId = "provider-balance-500",
+      ),
+    )
+
+    val transaction = coordinator.query(
+      "SELECT amount_minor, direction FROM transactions",
+    ).single()
+    assertEquals(50_000L, transaction["amount_minor"])
+    assertEquals("debit", transaction["direction"])
+  }
+
+  @Test
+  fun repeatingProviderMessageAndSubscriptionIsDeduplicatedEndToEnd() = withFreshDatabase { coordinator ->
+    val input = SmsIngestInput(
+      sender = "ICICIB",
+      body = "You have spent Rs.125.00 at SWIGGY using your card.",
+      timestamp = 1_780_272_000_000L,
+      subscriptionId = 2,
+      providerMessageId = "provider-dedupe-125",
+    )
+    SpendSmsIngestor.ingest(testContext(), coordinator, input)
+    SpendSmsIngestor.ingest(testContext(), coordinator, input)
+
+    val counts = coordinator.query(
+      """SELECT
+           (SELECT count(*) FROM source_alerts WHERE provider_message_id = ?) alerts,
+           (SELECT count(*) FROM transactions) transactions""",
+      arrayOf(input.providerMessageId!!),
+    ).single()
+    assertEquals(1L, counts["alerts"])
+    assertEquals(1L, counts["transactions"])
+  }
+
+  @Test
+  fun nonTransactionMessageKeepsParseStatusForLaterReprocessing() = withFreshDatabase { coordinator ->
+    SpendSmsIngestor.ingest(
+      testContext(),
+      coordinator,
+      SmsIngestInput(
+        sender = "BANK",
+        body = "Your monthly statement is ready to view in the mobile app.",
+        timestamp = 1_780_272_000_000L,
+        subscriptionId = 1,
+        providerMessageId = "provider-statement",
+      ),
+    )
+
+    val alert = coordinator.query("SELECT parse_status FROM source_alerts").single()
+    assertEquals("unknown_classification", alert["parse_status"])
+    assertEquals(0L, coordinator.query("SELECT count(*) AS count FROM transactions").single()["count"])
   }
 
   private fun testContext(): Context = InstrumentationRegistry.getInstrumentation().targetContext
