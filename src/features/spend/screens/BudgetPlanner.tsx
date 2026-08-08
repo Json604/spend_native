@@ -17,6 +17,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import MaterialCommunityIcons from "react-native-vector-icons/MaterialCommunityIcons";
 import { useSpend } from "../store/SpendProvider";
 import SpendMonthPager from "../components/SpendMonthPager";
+import { BudgetPlannerSkeleton } from "../components/SpendSkeleton";
 import {
   accountingMonthKey,
   previousAccountingMonthKey,
@@ -64,6 +65,7 @@ export default function BudgetPlanner() {
     selectedMonth,
     setSelectedMonth,
     availableMonths,
+    hydrating,
   } = useSpend();
   const monthKey = selectedMonth;
   const monthLabel = spendMonthLabel(monthKey);
@@ -486,7 +488,14 @@ export default function BudgetPlanner() {
         renderItem={renderItem}
         keyExtractor={(item) => item.id}
         ListHeaderComponent={listHeader}
-        ListEmptyComponent={<Text style={styles.emptyText}>No categories yet. Add one to start budgeting.</Text>}
+        ListEmptyComponent={
+          // An empty list means two very different things: still arriving, or
+          // genuinely nothing budgeted. Saying "no categories yet" while the
+          // data is still in flight reads as data loss.
+          hydrating
+            ? <BudgetPlannerSkeleton />
+            : <Text style={styles.emptyText}>No categories yet. Add one to start budgeting.</Text>
+        }
         ListFooterComponent={<Pressable onPress={() => setAddModalVisible(true)} style={styles.addRow}><Text style={styles.addPlus}>+</Text><Text style={styles.addText}>Add category</Text></Pressable>}
         contentContainerStyle={styles.listContent}
         keyboardShouldPersistTaps="handled"
