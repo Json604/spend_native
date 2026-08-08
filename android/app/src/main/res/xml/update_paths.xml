@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Only the update staging directory is ever exposed, and only so the
+         package installer can read the APK we just verified. -->
+    <cache-path name="updates" path="updates/" />
+</paths>

@@ -7,6 +7,9 @@
   <uses-permission android:name="android.permission.READ_SMS"/>
   <uses-permission android:name="android.permission.RECEIVE_SMS"/>
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+  <!-- Updates are self-hosted: Play restricts SMS permissions to default SMS
+       apps, so this app is distributed and updated from its own server. -->
+  <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
   <queries>
     <intent>
       <action android:name="android.intent.action.VIEW"/>
@@ -45,5 +48,14 @@
     <service android:name=".widget.SpendWidgetCategoriesService"
              android:permission="android.permission.BIND_REMOTEVIEWS"
              android:exported="false"/>
+    <provider
+        android:name="androidx.core.content.FileProvider"
+        android:authorities="${applicationId}.updates"
+        android:exported="false"
+        android:grantUriPermissions="true">
+      <meta-data
+          android:name="android.support.FILE_PROVIDER_PATHS"
+          android:resource="@xml/update_paths"/>
+    </provider>
   </application>
 </manifest>

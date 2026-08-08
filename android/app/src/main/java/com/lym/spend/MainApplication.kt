@@ -17,6 +17,7 @@ import com.lym.spend.widget.SpendWidgetBridgePackage
 import com.lym.spend.sms.SpendSmsPackage
 import com.lym.spend.db.SpendDatabasePackage
 import com.lym.spend.auth.SecureTokenStorePackage
+import com.lym.spend.update.SpendUpdatePackage
 
 class MainApplication : Application(), ReactApplication {
 
@@ -28,6 +29,7 @@ class MainApplication : Application(), ReactApplication {
               add(SpendSmsPackage())
               add(SpendDatabasePackage())
               add(SecureTokenStorePackage())
+              add(SpendUpdatePackage())
             }
 
         override fun getJSMainModuleName(): String = "index"
