@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/spend_widget_background"
+    android:orientation="vertical"
+    android:padding="18dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:layout_marginBottom="8dp">
+
+        <TextView
+            android:id="@+id/widget_month"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="TODAY'S SPEND"
+            android:textColor="#9C8B5C"
+            android:textSize="10sp"
+            android:textStyle="bold"
+            android:letterSpacing="0.16" />
+
+        <TextView
+            android:id="@+id/widget_add"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:layout_marginEnd="8dp"
+            android:background="@drawable/spend_widget_badge_background"
+            android:gravity="center"
+            android:text="+"
+            android:textColor="#FFD27A"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/widget_refresh"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:background="@drawable/spend_widget_badge_background"
+            android:gravity="center"
+            android:text="↻"
+            android:textColor="#FFD27A"
+            android:textSize="14sp" />
+    </LinearLayout>
+
+    <ListView
+        android:id="@+id/widget_categories_list"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:divider="@null"
+        android:dividerHeight="0dp"
+        android:listSelector="@android:color/transparent"
+        android:overScrollMode="never" />
+
+    <FrameLayout android:id="@+id/widget_currency" android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone" />
+    <FrameLayout android:id="@+id/widget_total" android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone" />
+    <FrameLayout android:id="@+id/widget_budget_row" android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone" />
+    <FrameLayout android:id="@+id/widget_budget_text" android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone" />
+    <FrameLayout android:id="@+id/widget_budget_bar" android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone" />
+    <FrameLayout android:id="@+id/widget_budget_pill" android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone" />
+    <FrameLayout android:id="@+id/widget_scroll_hint" android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone" />
+    <FrameLayout android:id="@+id/widget_empty" android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone" />
+    <FrameLayout android:id="@+id/widget_sync" android:layout_width="0dp" android:layout_height="0dp" android:visibility="gone" />
+</LinearLayout>
