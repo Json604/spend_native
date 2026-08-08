@@ -158,6 +158,16 @@ export default function BudgetPlanner() {
     return roots.map((root) => ({ root, children: childrenByParent.get(root.id) ?? [] }));
   }, [plannerOptions]);
 
+  // Categories that exist but are not in this month. Removing one from a month
+  // must not mean retyping its name to bring it back — and typing a name that
+  // already exists resolves to that category rather than creating a twin.
+  const notInThisMonth = useMemo(
+    () => plannerOptions
+      .filter((option) => option.budgetMinor === 0)
+      .sort((left, right) => left.label.localeCompare(right.label)),
+    [plannerOptions],
+  );
+
   const metric = (option: PlannerOption, key: "amount" | "percent") =>
     key === "percent"
       ? option.budgetMinor > 0 ? option.spentMinor / option.budgetMinor : option.spentMinor > 0 ? 1 : 0
@@ -178,9 +188,14 @@ export default function BudgetPlanner() {
           const matchesRoot = !query || group.root.label.toLowerCase().includes(query);
           const children = group.children.filter((child) => {
             const inSection = section === "recurring" ? child.recurring : !child.recurring;
-            return inSection && (!query || matchesRoot || child.label.toLowerCase().includes(query));
+            // A category is IN a month when it has a budget line there. Listing
+            // every category that has ever existed is what made this screen a
+            // wall of mostly-empty rows, and it is why "remove" appeared to do
+            // nothing: the amount cleared, the row stayed.
+            return inSection && child.budgetMinor > 0 && (!query || matchesRoot || child.label.toLowerCase().includes(query));
           });
-          const rootIsMember = group.children.length === 0 && (section === "recurring" ? group.root.recurring : !group.root.recurring);
+          const rootIsMember = group.children.length === 0 && group.root.budgetMinor > 0
+            && (section === "recurring" ? group.root.recurring : !group.root.recurring);
           if (!rootIsMember && children.length === 0) return null;
           return { group, children, rootIsMember };
         })
@@ -329,41 +344,6 @@ export default function BudgetPlanner() {
               setEditing(null);
             } catch (error) {
               Alert.alert("Couldn't remove", error instanceof Error ? error.message : "Try again.");
-            } finally {
-              setSavingEdit(false);
-            }
-          },
-        },
-      ],
-    );
-  };
-
-  /**
-   * Deleting the category itself, everywhere. Kept separate from the per-month
-   * remove above and worded plainly, because the server cascades a category
-   * delete to its budget lines and allocations in EVERY month — including
-   * closed ones. That is occasionally what the user wants (a typo, a category
-   * they never used) and never what they want by accident.
-   */
-  const deleteCategoryEverywhere = () => {
-    if (!editing || savingEdit) return;
-    const option = editing;
-    const spent = option.spentMinor > 0 ? ` It has ${spendCurrency(option.spentMinor)} of spending this month, which will become uncategorised.` : "";
-    Alert.alert(
-      `Delete ${option.label} entirely?`,
-      `This removes the category and its budget from every month, including past ones.${spent} To clear it for ${monthLabel} alone, use "Remove from ${monthLabel}" instead.`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete everywhere",
-          style: "destructive",
-          onPress: async () => {
-            setSavingEdit(true);
-            try {
-              await actions.archiveCategory(option.id);
-              setEditing(null);
-            } catch (error) {
-              Alert.alert("Couldn't delete", error instanceof Error ? error.message : "Try again.");
             } finally {
               setSavingEdit(false);
             }
@@ -569,21 +549,14 @@ export default function BudgetPlanner() {
 
             {editing && editing.budgetMinor > 0 ? (
               <Pressable onPress={removeFromMonth} disabled={savingEdit} style={styles.removeRow}>
-                <MaterialCommunityIcons name="calendar-remove-outline" size={18} color="#FFB74D" />
+                <MaterialCommunityIcons name="calendar-remove-outline" size={18} color="#FF8A80" />
                 <View style={{ flex: 1 }}>
                   <Text style={styles.removeText}>Remove from {monthLabel}</Text>
-                  <Text style={styles.removeHint}>Clears this month's budget. Other months keep theirs.</Text>
+                  <Text style={styles.removeHint}>Other months keep it. Add it back any time.</Text>
                 </View>
               </Pressable>
             ) : null}
 
-            <Pressable onPress={deleteCategoryEverywhere} disabled={savingEdit} style={styles.removeRow}>
-              <MaterialCommunityIcons name="trash-can-outline" size={18} color="#FF8A80" />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.deleteText}>Delete category</Text>
-                <Text style={styles.removeHint}>Removes it from every month, including past ones.</Text>
-              </View>
-            </Pressable>
 
             <View style={styles.modalActions}>
               <Pressable onPress={closeEditor} style={styles.modalButton}>
@@ -605,7 +578,27 @@ export default function BudgetPlanner() {
         onShow={() => setTimeout(() => addInputRef.current?.focus(), 60)}
       >
         <View style={styles.modalBackdrop}><Pressable style={StyleSheet.absoluteFillObject} onPress={() => setAddModalVisible(false)} /><View style={styles.modalSheet}>
-          <Text style={styles.modalKicker}>New category</Text><Text style={styles.modalTitle}>Name this category</Text>
+          <Text style={styles.modalKicker}>Add to {monthLabel}</Text><Text style={styles.modalTitle}>Name this category</Text>
+          {notInThisMonth.length > 0 ? (
+            <>
+              <Text style={styles.parentLabel}>Not in {monthLabel} yet</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.parentChipWrap}>
+                {notInThisMonth.map((option) => (
+                  <Pressable
+                    key={option.id}
+                    onPress={() => {
+                      setNewCategoryLabel(option.label);
+                      setNewCategoryParentId(option.parentId ?? null);
+                      setTimeout(() => addAmountRef.current?.focus(), 40);
+                    }}
+                    style={[styles.parentChip, { borderColor: option.tint }, newCategoryLabel === option.label && styles.parentChipActive]}
+                  >
+                    <Text style={styles.parentChipText}>{option.label}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+            </>
+          ) : null}
           <TextInput
             ref={addInputRef}
             value={newCategoryLabel}
@@ -655,7 +648,6 @@ const styles = StyleSheet.create({
   recurringToggle: { flexDirection: "row", alignItems: "center", gap: 12, marginTop: 20 },
   removeRow: { flexDirection: "row", alignItems: "center", gap: 8, marginTop: 22, paddingVertical: 6 },
   removeText: { color: "#FFB74D", fontSize: 14, fontWeight: "500" },
-  deleteText: { color: "#FF8A80", fontSize: 14, fontWeight: "500" },
   removeHint: { color: "rgba(255,255,255,0.45)", fontSize: 12, marginTop: 2 },
   recurringToggleLabel: { color: "#D8CDB0", fontSize: 15, fontWeight: "600" },
   recurringToggleHint: { color: "#6D6048", fontSize: 12, marginTop: 2 },
