@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.widget.RemoteViews
 import com.lym.spend.MainActivity
+import com.lym.spend.db.SpendCoordinator
 import com.lym.spend.R
 
 class SpendWidgetProvider : AppWidgetProvider() {
@@ -26,9 +27,25 @@ class SpendWidgetProvider : AppWidgetProvider() {
 
     override fun onReceive(context: Context, intent: Intent) {
         super.onReceive(context, intent)
-        if (intent.action == ACTION_REFRESH) {
-            refreshAllWidgets(context)
-        }
+        if (intent.action != ACTION_REFRESH) return
+        // Re-READ before re-rendering. This used to call refreshAllWidgets alone,
+        // which redraws from the SharedPreferences cache — and that cache only
+        // changes when the JS app pushes a snapshot or an SMS arrives. Tapping ↻
+        // therefore redrew byte-identical content and looked broken. The refresh
+        // has to go to the database, which is what the SMS path already does.
+        val pending = goAsync()
+        Thread {
+            try {
+                val app = context.applicationContext
+                SpendWidgetStorage.refreshFromDatabase(app, SpendCoordinator.getInstance(app))
+                refreshAllWidgets(app)
+            } catch (_: Throwable) {
+                // A failed refresh must not take the widget down; the stale render
+                // stays on screen and the next update tries again.
+            } finally {
+                pending.finish()
+            }
+        }.start()
     }
 
     companion object {
@@ -73,8 +90,22 @@ class SpendWidgetProvider : AppWidgetProvider() {
             views.setOnClickPendingIntent(R.id.widget_refresh, refreshPending)
 
             if (!isCompact) {
-                // + button → also launch app (no deep link wired for it yet)
-                views.setOnClickPendingIntent(R.id.widget_add, launchPending)
+                // + button → open the add-transaction screen, not just the app.
+                // It previously reused the plain launch intent, so it dropped the
+                // user on the home screen with nothing added and no indication
+                // that the button had done anything at all.
+                val addIntent = Intent(Intent.ACTION_VIEW, Uri.parse("lym://spend/add")).apply {
+                    setPackage(context.packageName)
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                }
+                val addPending = PendingIntent.getActivity(
+                    // A distinct request code: PendingIntent identity ignores extras
+                    // and data, so sharing one with the launch intent would hand back
+                    // the same pending intent and the + would just open the app.
+                    context, appWidgetId * 10 + 1, addIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                )
+                views.setOnClickPendingIntent(R.id.widget_add, addPending)
 
                 // Categories ListView remote adapter
                 val serviceIntent = Intent(context, SpendWidgetCategoriesService::class.java).apply {

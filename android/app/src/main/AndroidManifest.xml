@@ -23,6 +23,15 @@
         <action android:name="android.intent.action.MAIN"/>
         <category android:name="android.intent.category.LAUNCHER"/>
       </intent-filter>
+      <!-- The app listens for lym://spend/add and lym://spend/budget, but
+           nothing could deliver them: without this filter the widget's +
+           button had no way to reach the add screen. -->
+      <intent-filter>
+        <action android:name="android.intent.action.VIEW"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <category android:name="android.intent.category.BROWSABLE"/>
+        <data android:scheme="lym" android:host="spend"/>
+      </intent-filter>
     </activity>
 
     <receiver android:name=".widget.SpendWidgetProvider" android:exported="true">
