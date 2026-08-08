@@ -45,7 +45,16 @@ export function buildApp(pool: Pool, config: Config): FastifyInstance {
   });
 
   app.setErrorHandler((error, request, reply) => {
-    if (isApiError(error)) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message, details: error.details } });
+    if (isApiError(error)) {
+      // Log WHY, not just the status code. A bare 400 in the access log is
+      // undiagnosable from the server side, which cost real time chasing the
+      // first device sync failure.
+      request.log.warn(
+        { code: error.code, reason: error.message, url: request.url, details: error.details },
+        'request rejected'
+      );
+      return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message, details: error.details } });
+    }
     request.log.error(error);
     return reply.code(500).send({ error: { code: 'internal_error', message: 'Internal server error' } });
   });

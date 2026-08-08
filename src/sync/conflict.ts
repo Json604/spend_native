@@ -35,6 +35,7 @@ export function applyFieldLww(row: RowState | undefined, op: SyncOp, serverSeq: 
   const data = { ...current.data };
   const fieldClocks = { ...current.fieldClocks };
   const changed: string[] = [];
+  let applied = false;
   for (const [field, rawValue] of Object.entries(fields)) {
     const envelope = fieldEnvelope(rawValue, op.source);
     const previous = fieldClocks[field];
@@ -44,9 +45,21 @@ export function applyFieldLww(row: RowState | undefined, op: SyncOp, serverSeq: 
       if (JSON.stringify(data[field]) !== JSON.stringify(envelope.value)) changed.push(field);
       data[field] = envelope.value;
       fieldClocks[field] = { seq: serverSeq, ...(envelope.source ? { source: envelope.source } : {}) };
+      applied = true;
     }
   }
-  return { row: { data, fieldClocks, deletedAt: current.deletedAt ?? null }, changed, skipped: false };
+  // A tombstone must not outrank a strictly newer write. Previously an upsert
+  // always preserved deletedAt, so a client recreating a row it still believed
+  // in could never revive it — its fields landed on an invisible row and the
+  // data was silently lost. That is what stranded a month of budget lines on
+  // categories a server-side dedupe had soft-deleted.
+  //
+  // Only a write that actually won on at least one field revives the row; an
+  // upsert entirely rejected by LWW or by provenance leaves the tombstone
+  // standing, so a delete still beats every older write.
+  const deletedAt = applied ? null : current.deletedAt ?? null;
+  if (applied && current.deletedAt) changed.push('deleted_at');
+  return { row: { data, fieldClocks, deletedAt }, changed, skipped: false };
 }
 
 export type PullableOp = { serverSeq: number; applied: boolean; value: unknown };

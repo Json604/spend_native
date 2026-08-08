@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { RefreshFamilyStore } from '../src/auth/refresh.ts';
 import { applyFieldLww, computePullCursor } from '../src/sync/conflict.ts';
 import { IdempotencyStore } from '../src/sync/idempotency.ts';
+import { deriveOpId } from '../src/sync/opIds.ts';
 
 test('reuse of a rotated refresh token revokes the whole family', () => {
   const store = new RefreshFamilyStore();
@@ -37,6 +38,42 @@ test('manual allocation survives a later machine-sourced operation', () => {
   const later = applyFieldLww(first, { opId: 'b', entity: 'transaction_allocations', entityId: 'x', action: 'upsert', source: 'llm', fields: { categoryId: 'travel', source: 'llm' } }, 2);
   assert.equal(later.skipped, true);
   assert.equal(later.row.data.categoryId, 'food');
+});
+
+test('a newer upsert revives a soft-deleted row instead of writing to a ghost', () => {
+  // The incident: a dedupe soft-deleted a category the device still believed in.
+  // Every later write landed on an invisible row and the budget vanished.
+  const deleted = applyFieldLww({ data: { label: 'Piano' }, fieldClocks: {}, deletedAt: '2026-08-08T04:00:00.000Z' },
+    { opId: 'a', entity: 'categories', entityId: 'x', action: 'upsert', fields: { label: 'Piano' } }, 9);
+  assert.equal(deleted.row.deletedAt, null);
+  assert.ok(deleted.changed.includes('deleted_at'));
+});
+
+test('a tombstone still outranks a write that loses on every field', () => {
+  const row = { data: { categoryId: 'food', source: 'manual' }, fieldClocks: { categoryId: { seq: 5, source: 'manual' } }, deletedAt: '2026-08-08T04:00:00.000Z' };
+  const machineWrite = applyFieldLww(row,
+    { opId: 'b', entity: 'transaction_allocations', entityId: 'x', action: 'upsert', source: 'llm', fields: { categoryId: 'travel', source: 'llm' } }, 11);
+  assert.equal(machineWrite.skipped, true);
+  assert.equal(machineWrite.row.deletedAt, '2026-08-08T04:00:00.000Z');
+});
+
+test('reviving a row does not let a machine source overwrite a manual field', () => {
+  const row = { data: { categoryId: 'food', source: 'manual' }, fieldClocks: { categoryId: { seq: 5, source: 'manual' } }, deletedAt: '2026-08-08T04:00:00.000Z' };
+  const revived = applyFieldLww(row,
+    { opId: 'c', entity: 'transaction_allocations', entityId: 'x', action: 'upsert', fields: { note: 'hello', categoryId: { value: 'travel', source: 'llm' } } }, 12);
+  assert.equal(revived.row.deletedAt, null);
+  assert.equal(revived.row.data.categoryId, 'food');
+  assert.equal(revived.row.data.note, 'hello');
+});
+
+test('cascade operation ids are deterministic, distinct, and valid uuids', () => {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const first = deriveOpId('11111111-1111-4111-8111-111111111111', 'budgets', 'row-1');
+  assert.match(first, uuid);
+  assert.equal(first, deriveOpId('11111111-1111-4111-8111-111111111111', 'budgets', 'row-1'));
+  assert.notEqual(first, deriveOpId('11111111-1111-4111-8111-111111111111', 'budgets', 'row-2'));
+  assert.notEqual(first, deriveOpId('11111111-1111-4111-8111-111111111111', 'transaction_allocations', 'row-1'));
+  assert.notEqual(first, deriveOpId('22222222-2222-4222-8222-222222222222', 'budgets', 'row-1'));
 });
 
 test('a tombstone propagates and cursor stops before an unapplied operation', () => {

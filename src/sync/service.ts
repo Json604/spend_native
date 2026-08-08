@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from 'pg';
 import type { Db } from '../db.js';
 import { ApiError } from '../errors.js';
 import { applyFieldLww, computePullCursor, type RowState, type SyncOp } from './conflict.js';
+import { deriveOpId } from './opIds.js';
 
 const TABLES: Record<string, string> = {
   transactions: 'transactions',
@@ -53,7 +54,56 @@ export class SyncService {
     const seq = Number(seqResult.rows[0].nextval);
     const table = TABLES[op.entity];
     const existingResult = await client.query<StoredRow>(`SELECT data,field_clocks,deleted_at,${op.entity === 'transaction_allocations' ? 'source' : 'NULL::text AS source'} FROM ${table} WHERE id=$1 AND user_id=$2 FOR UPDATE`, [op.entityId, userId]);
-    const existing = existingResult.rows[0];
+    let existing = existingResult.rows[0];
+
+    // The server owns category-label uniqueness, so it also owns resolving a
+    // clash. Two devices naming the same category independently generate two
+    // ids; without this the second insert violates the unique index and the
+    // whole push fails. Redirect the op onto the category that already holds
+    // the label instead — the user meant one category, not two.
+    // Also fires when the named row is soft-deleted: an upsert now revives a
+    // tombstoned row, and reviving one whose label a live twin already holds
+    // would violate the uniqueness index and fail the entire push. Redirecting
+    // is what the user meant anyway — one category, not a resurrected rival.
+    if ((!existing || existing.deleted_at) && op.entity === 'categories' && op.action === 'upsert') {
+      const label = typeof op.fields?.label === 'string' ? op.fields.label : null;
+      if (label) {
+        const claimed = await client.query<{ id: string } & StoredRow>(
+          `SELECT id,data,field_clocks,deleted_at,NULL::text AS source FROM ${table}
+             WHERE user_id=$1 AND lower(data->>'label')=lower($2) AND deleted_at IS NULL
+             LIMIT 1 FOR UPDATE`,
+          [userId, label],
+        );
+        if (claimed.rows[0]) {
+          op = { ...op, entityId: claimed.rows[0].id };
+          existing = claimed.rows[0];
+        }
+      }
+    }
+    // The redirect above resolves IDENTITY — who this row is. The same
+    // authority rule has to cover REFERENCES, or the two disagree: the category
+    // op lands on the surviving row while a budget op keeps naming the dead one,
+    // and the budget ends up live but attached to a tombstone. Invisible to the
+    // client, still real in the table. That stranded 18 budget lines here.
+    if (op.action === 'upsert' && (op.entity === 'budgets' || op.entity === 'transaction_allocations')) {
+      const redirected = await resolveCategoryReference(client, userId, op);
+      if (redirected) op = redirected;
+
+      // Rewriting the reference can point this row at a category that already
+      // owns a row for the same natural key, which the unique indexes reject —
+      // and a rejection fails the entire push, not just this operation. Claim
+      // the existing row instead, the same way a label clash is resolved. A
+      // soft-deleted row counts too, since an upsert would now revive it into
+      // the same collision.
+      if (!existing || existing.deleted_at) {
+        const claimed = await claimByNaturalKey(client, userId, op);
+        if (claimed) {
+          op = { ...op, entityId: claimed.id };
+          existing = claimed;
+        }
+      }
+    }
+
     const current: RowState | undefined = existing ? { data: { ...existing.data, ...(existing.source ? { source: existing.source } : {}) }, fieldClocks: existing.field_clocks ?? {}, deletedAt: existing.deleted_at?.toISOString() ?? null } : undefined;
     const result = applyFieldLww(current, op, seq);
     const outcome = { opId: op.opId, entity: op.entity, entityId: op.entityId, serverSeq: seq, changed: result.changed, skipped: result.skipped };
@@ -71,7 +121,42 @@ export class SyncService {
       await client.query(`INSERT INTO ${table}(${columns}) VALUES ${valueSql}`, values);
     }
     await client.query('INSERT INTO sync_ops(op_id,user_id,device_id,entity_type,entity_id,action,payload,outcome,server_seq) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)', [op.opId, userId, deviceId, op.entity, op.entityId, op.action, op, outcome, seq]);
+    if (op.entity === 'categories' && op.action === 'delete') {
+      await this.cascadeCategoryDelete(client, userId, deviceId, op);
+    }
     return { conflict: result.skipped, value: outcome };
+  }
+
+  /**
+   * Deleting a category deletes what depends on it. Without this the budget and
+   * allocation rows stay live while pointing at a tombstone: the client filters
+   * them out because their category is gone, so the user cannot see or fix them,
+   * yet they still exist and still sum. A month of budget went missing that way.
+   *
+   * Each cascaded delete is written as its own operation with its own sequence,
+   * because a client rebuilding from the log has no other way to learn the row
+   * died. The child op id is derived from the parent's, so replaying the parent
+   * finds the children already recorded instead of deleting a second time.
+   */
+  private async cascadeCategoryDelete(client: PoolClient, userId: string, deviceId: string, op: SyncOp): Promise<void> {
+    for (const entity of ['budgets', 'transaction_allocations'] as const) {
+      const table = TABLES[entity];
+      const dependents = await client.query<{ id: string }>(
+        `SELECT id FROM ${table} WHERE user_id=$1 AND data->>'categoryId'=$2 AND deleted_at IS NULL FOR UPDATE`,
+        [userId, op.entityId],
+      );
+      for (const row of dependents.rows) {
+        const childOpId = deriveOpId(op.opId, entity, row.id);
+        const seen = await client.query('SELECT 1 FROM sync_ops WHERE op_id=$1', [childOpId]);
+        if (seen.rowCount) continue;
+        const seqResult = await client.query<{ nextval: string }>("SELECT nextval('sync_sequence')");
+        const seq = Number(seqResult.rows[0].nextval);
+        await client.query(`UPDATE ${table} SET deleted_at=now(),updated_at=now(),server_seq=$1 WHERE id=$2 AND user_id=$3`, [seq, row.id, userId]);
+        const childOp: SyncOp = { opId: childOpId, entity, entityId: row.id, action: 'delete' };
+        const childOutcome = { opId: childOpId, entity, entityId: row.id, serverSeq: seq, changed: ['deleted_at'], skipped: false, cascadedFrom: op.opId };
+        await client.query('INSERT INTO sync_ops(op_id,user_id,device_id,entity_type,entity_id,action,payload,outcome,server_seq) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)', [childOpId, userId, deviceId, entity, row.id, 'delete', childOp, childOutcome, seq]);
+      }
+    }
   }
 
   async pull(userId: string, since: number): Promise<{ ops: unknown[]; cursor: number }> {
@@ -85,11 +170,84 @@ export class SyncService {
   }
 }
 
+/** Fields may arrive bare or wrapped as {value, source}; read through both. */
+function plainField(op: SyncOp, name: string): string | null {
+  const raw = op.fields?.[name];
+  const value = raw && typeof raw === 'object' && !Array.isArray(raw) && 'value' in raw
+    ? (raw as { value: unknown }).value
+    : raw;
+  return typeof value === 'string' && value !== '' ? value : null;
+}
+
+function withField(op: SyncOp, name: string, value: string): SyncOp {
+  const raw = op.fields?.[name];
+  const wrapped = raw && typeof raw === 'object' && !Array.isArray(raw) && 'value' in raw;
+  return { ...op, fields: { ...op.fields, [name]: wrapped ? { ...(raw as object), value } : value } };
+}
+
+/**
+ * A reference to a soft-deleted category is resolved to the live category that
+ * now holds that label. The client is not wrong to name the dead id — it was
+ * valid when the device last synced — so the server, which owns the merge,
+ * translates rather than rejects.
+ */
+async function resolveCategoryReference(client: PoolClient, userId: string, op: SyncOp): Promise<SyncOp | null> {
+  const categoryId = plainField(op, 'categoryId');
+  if (!categoryId) return null;
+  const dead = await client.query<{ label: string | null }>(
+    `SELECT data->>'label' AS label FROM categories WHERE id=$1 AND user_id=$2 AND deleted_at IS NOT NULL`,
+    [categoryId, userId],
+  );
+  const label = dead.rows[0]?.label;
+  if (!label) return null;
+  const live = await client.query<{ id: string }>(
+    `SELECT id FROM categories WHERE user_id=$1 AND lower(data->>'label')=lower($2) AND deleted_at IS NULL LIMIT 1`,
+    [userId, label],
+  );
+  const liveId = live.rows[0]?.id;
+  if (!liveId || liveId === categoryId) return null;
+  return withField(op, 'categoryId', liveId);
+}
+
+/** Find the row that already owns this op's natural key, so a redirected
+ *  reference updates it instead of colliding with its unique index. */
+async function claimByNaturalKey(client: PoolClient, userId: string, op: SyncOp): Promise<({ id: string } & StoredRow) | null> {
+  const categoryId = plainField(op, 'categoryId');
+  if (!categoryId) return null;
+  if (op.entity === 'budgets') {
+    const monthKey = plainField(op, 'monthKey');
+    if (!monthKey) return null;
+    const claimed = await client.query<{ id: string } & StoredRow>(
+      `SELECT id,data,field_clocks,deleted_at,NULL::text AS source FROM budgets
+         WHERE user_id=$1 AND data->>'monthKey'=$2 AND data->>'categoryId'=$3 AND deleted_at IS NULL
+         LIMIT 1 FOR UPDATE`,
+      [userId, monthKey, categoryId],
+    );
+    return claimed.rows[0] ?? null;
+  }
+  const transactionId = plainField(op, 'transactionId');
+  if (!transactionId) return null;
+  const claimed = await client.query<{ id: string } & StoredRow>(
+    `SELECT id,data,field_clocks,deleted_at,source FROM transaction_allocations
+       WHERE user_id=$1 AND transaction_id=$2 AND data->>'categoryId'=$3 AND deleted_at IS NULL
+       LIMIT 1 FOR UPDATE`,
+    [userId, transactionId, categoryId],
+  );
+  return claimed.rows[0] ?? null;
+}
+
 function validateOp(op: SyncOp): void {
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
   if (!op || typeof op.opId !== 'string' || !uuid.test(op.opId)) throw new ApiError(400, 'invalid_operation', 'Every operation needs a UUID opId');
   if (!TABLES[op.entity]) throw new ApiError(400, 'invalid_operation', 'Unknown sync entity');
-  if (!uuid.test(op.entityId)) throw new ApiError(400, 'invalid_operation', 'Every operation needs a UUID entityId');
+  // entityId is DEVICE-generated and deliberately meaningful — 'sms:8393' embeds
+  // the provider message id, which is what makes re-ingesting the same SMS
+  // idempotent, and categories use stable slugs like 'custom:fruits'. Requiring a
+  // UUID here rejected every real op. opId stays a UUID: the client mints it per
+  // operation purely as an idempotency key.
+  if (typeof op.entityId !== 'string' || op.entityId.trim() === '' || op.entityId.length > 200) {
+    throw new ApiError(400, 'invalid_operation', 'Every operation needs a non-empty entityId of at most 200 characters');
+  }
   if (op.action !== 'upsert' && op.action !== 'delete') throw new ApiError(400, 'invalid_operation', 'Operation action must be upsert or delete');
   if (op.action === 'upsert' && (!op.fields || typeof op.fields !== 'object' || Array.isArray(op.fields))) throw new ApiError(400, 'invalid_operation', 'Upsert operations need fields');
 }
