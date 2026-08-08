@@ -19,6 +19,7 @@ import { syncEngine, type SyncEngineState } from "../../../sync/syncEngine";
 import { getSmsPermissionState, type SmsPermissionState } from "../../spend/services/smsIngestion";
 import { useSpend } from "../../spend/store/SpendProvider";
 import type { StackParamList } from "../../../navigation/types";
+import { checkForUpdate, currentVersion } from "../../../update/updateChecker";
 
 type ProfileNavigation = StackNavigationProp<StackParamList, "Profile">;
 type UserRecord = Record<string, unknown>;
@@ -103,8 +104,19 @@ export default function ProfileScreen() {
   const navigation = useNavigation<ProfileNavigation>();
   const { user, signOut } = useAuth();
   const { domain, categories, actions } = useSpend();
+  // Read from the installed package rather than a literal. A hardcoded string
+  // is wrong the moment it ships, and it is exactly the field a user checks to
+  // find out whether an update actually landed.
+  const [appVersion, setAppVersion] = useState("");
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [permission, setPermission] = useState<SmsPermissionState>("denied");
   const [pendingCount, setPendingCount] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    currentVersion().then((version) => { if (!cancelled) setAppVersion(version); });
+    return () => { cancelled = true; };
+  }, []);
   const [deadLetterCount, setDeadLetterCount] = useState(0);
   const [syncing, setSyncing] = useState(false);
   const [permissionBusy, setPermissionBusy] = useState(false);
@@ -243,7 +255,20 @@ export default function ProfileScreen() {
         </Section>
 
         <Section title="ABOUT">
-          <ProfileRow icon="information-outline" label="App version" value="2.0.0" />
+          <ProfileRow
+            icon="information-outline"
+            label="App version"
+            value={appVersion || "…"}
+            busy={checkingUpdate}
+            onPress={async () => {
+              setCheckingUpdate(true);
+              try {
+                await checkForUpdate({ silent: false });
+              } finally {
+                setCheckingUpdate(false);
+              }
+            }}
+          />
           <ProfileRow icon="shield-lock-outline" label="Privacy stance" value="SMS is parsed on this device. Only redacted fields are ever synced." />
         </Section>
 
