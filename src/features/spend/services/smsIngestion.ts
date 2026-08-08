@@ -22,21 +22,6 @@ export type SmsIngestionSnapshot = {
   rawMessages: SmsNativeInboxMessage[];
 };
 
-function parseAmountMinor(amountText: string | null) {
-  if (!amountText) {
-    return 0;
-  }
-
-  const normalized = amountText.replace(/,/g, '');
-  const parsed = Number.parseFloat(normalized);
-
-  if (!Number.isFinite(parsed)) {
-    return 0;
-  }
-
-  return Math.round(parsed * 100);
-}
-
 function inferChannel(rawText: string): SpendSeedTransactionInput['channel'] {
   if (/\bupi\b/i.test(rawText)) {
     return 'upi';
@@ -64,7 +49,7 @@ export function convertSmsCandidatesToTransactions(
 ): SpendSeedTransactionInput[] {
   return candidates
     .map(candidate => {
-      const amountMinor = parseAmountMinor(candidate.amountText);
+      const amountMinor = candidate.amountMinor;
 
       if (!amountMinor) {
         return null;
@@ -78,7 +63,8 @@ export function convertSmsCandidatesToTransactions(
         occurredAt: new Date(candidate.timestamp).toISOString(),
         amountMinor,
         currencyCode: candidate.currency === 'INR' ? 'INR' : 'UNKNOWN',
-        merchantName: candidate.merchantHint ?? candidate.rawSender ?? 'Unknown payee',
+        merchantName: candidate.merchantHint ?? 'Unknown payee',
+        counterpartyKey: candidate.counterpartyKey ?? undefined,
         description: candidate.rawText,
         channel: inferChannel(candidate.rawText),
         direction: inferDirection(candidate),

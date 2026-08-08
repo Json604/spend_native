@@ -23,7 +23,7 @@ function normalizeToken(value: string | undefined) {
 }
 
 function normalizeCounterparty(value: string | undefined) {
-  return normalizeToken(value).replace(/[^a-z0-9@._ -]/g, "");
+  return normalizeToken(value).replace(/[^a-z0-9:@._ -]/g, "");
 }
 
 function hourBucket(value: string) {
@@ -260,9 +260,14 @@ function inferDirection(input: SpendSeedTransactionInput) {
 
 function createTransaction(input: SpendSeedTransactionInput, state: SpendDomainState): SpendTransaction {
   const normalizedMerchantName = normalizeToken(input.merchantName);
-  const counterpartyKey = normalizeCounterparty(
-    input.counterpartyKey ?? input.merchantName ?? input.description,
-  );
+  const counterpartyKey =
+    input.source === "sms"
+      ? input.counterpartyKey
+        ? normalizeCounterparty(input.counterpartyKey)
+        : undefined
+      : normalizeCounterparty(
+          input.counterpartyKey ?? input.merchantName ?? input.description,
+        );
 
   return categorizeTransaction(
     {

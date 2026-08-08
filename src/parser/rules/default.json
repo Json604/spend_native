@@ -1,0 +1,135 @@
+{
+  "version": 1,
+  "classifierOrder": [
+    {"classification": "security", "group": "security"},
+    {"classification": "marketing", "group": "strong_marketing"},
+    {"classification": "reversal", "group": "failure"},
+    {"classification": "mandate_setup", "group": "mandate_setup"},
+    {"classification": "pending", "group": "pending"},
+    {"classification": "posted_credit", "group": "posted_credit"},
+    {"classification": "posted_debit", "group": "posted_debit"},
+    {"classification": "balance_only", "group": "balance"},
+    {"classification": "marketing", "group": "soft_marketing"}
+  ],
+  "classifiers": {
+    "security": [
+      "\\botp\\b",
+      "\\bone[ -]?time password\\b",
+      "\\blog[ -]?in\\b",
+      "\\bpassword\\b",
+      "\\bkyc\\b"
+    ],
+    "strong_marketing": [
+      "\\bpre[ -]?approved\\b",
+      "\\blifetime free\\b",
+      "\\bget\\s+up\\s*to\\b",
+      "\\bget\\s+assured\\b",
+      "\\bcashback\\s+on\\b",
+      "\\buse\\s+code\\b",
+      "\\bvalid\\s+for\\s+(?:a\\s+)?limited\\s+time\\b",
+      "\\bapply\\s+now\\b",
+      "\\blimited\\s+period\\b",
+      "\\bt\\s*&\\s*c\\b"
+    ],
+    "soft_marketing": [
+      "\\bclicks?\\b",
+      "\\bcashback\\b",
+      "\\breward points?\\b",
+      "\\bjoining fees?\\b",
+      "\\bdiscounts?\\b",
+      "\\bpay now\\b",
+      "\\bcheck now\\b"
+    ],
+    "failure": [
+      "\\bfailed\\b",
+      "\\bdeclined\\b",
+      "\\bunsuccessful\\b",
+      "\\breversed\\b",
+      "\\bcould not be processed\\b",
+      "\\b(?:was not|wasn['’]t) validated\\b"
+    ],
+    "mandate_setup": [
+      "\\be[ -]?mandate\\b",
+      "\\bmandate\\b",
+      "\\bauto[ -]?pay\\s+(?:is\\s+)?(?:set|setup|activated|registered|enabled)\\b",
+      "\\bwill be debited on\\b",
+      "\\bwill be debited\\b",
+      "\\bscheduled\\b",
+      "\\bcollect request\\b",
+      "\\brequesting payment\\b"
+    ],
+    "pending": [
+      "\\bpending\\b",
+      "\\bawaiting\\b",
+      "\\bprocessing\\b",
+      "\\binitiated\\b",
+      "\\byet to be processed\\b"
+    ],
+    "posted_credit": [
+      "\\bcredited\\s+to\\b",
+      "\\bcredited\\s+by\\b",
+      "\\breceived\\b[\\s\\S]{0,100}\\bin your\\b",
+      "\\brefund\\s+of\\b",
+      "\\brefunded\\s+to\\b"
+    ],
+    "posted_debit": [
+      "\\bdebited\\b",
+      "\\bdebit\\s+of\\b",
+      "\\bsent\\s+(?=(?:rs\\.?|inr|₹)\\s*\\d)",
+      "\\bspent\\b",
+      "\\bpaid\\b",
+      "\\bwithdrawn\\b",
+      "\\bcharged\\b",
+      "\\bpurchased?\\b",
+      "\\brecharge\\s+of\\s+(?:rs\\.?|inr|₹)\\s*\\d[\\s\\S]{0,40}\\bis successful\\b"
+    ],
+    "balance": [
+      "\\bavl\\.?\\s*bal\\b",
+      "\\bavailable\\s+balance\\b",
+      "\\b(?:a/c|account)\\s+balance\\b",
+      "\\bbalance\\s+(?:is|as of)\\b",
+      "\\bbal\\.?\\s*(?:rs\\.?|inr|₹)"
+    ]
+  },
+  "monetaryRoleOrder": [
+    "available_balance",
+    "credit_limit",
+    "minimum_due",
+    "emi_amount",
+    "bill_amount",
+    "promised_cashback",
+    "transaction_amount"
+  ],
+  "monetaryRoles": {
+    "available_balance": [
+      "(?:\\bavl\\.?\\s*bal(?:ance)?|\\bavail(?:able)?\\s+bal(?:ance)?|\\bbal(?:ance)?\\.?)\\s*(?:is|of)?\\s*[:\\-]?\\s*<AMOUNT>",
+      "<AMOUNT>\\s*(?:is\\s+)?(?:the\\s+)?available\\s+balance\\b"
+    ],
+    "credit_limit": [
+      "(?:\\bcredit\\s+limit|\\blimit|\\beligibility)\\s*(?:is|of)?\\s*[:\\-]?\\s*<AMOUNT>",
+      "<AMOUNT>\\s*(?:is\\s+)?(?:your\\s+)?(?:credit\\s+)?limit\\b",
+      "<AMOUNT>\\s*(?:[a-z0-9-]+\\s+){0,3}credit\\s+(?:limit|for)\\b"
+    ],
+    "minimum_due": [
+      "\\bminimum\\s+(?:amount\\s+)?due\\s*(?:is)?\\s*[:\\-]?\\s*<AMOUNT>",
+      "<AMOUNT>\\s*(?:is\\s+)?(?:the\\s+)?minimum\\s+(?:amount\\s+)?due\\b"
+    ],
+    "emi_amount": [
+      "\\b(?:emi|instalment|installment)(?:\\s+amount|\\s+of)?\\s*(?:is)?\\s*[:\\-]?\\s*<AMOUNT>",
+      "<AMOUNT>\\s*(?:emi|instalment|installment)\\b"
+    ],
+    "bill_amount": [
+      "\\b(?:bill(?:\\s+(?:payment|amount))?|total\\s+(?:amt\\.?|amount)\\s+due|(?:amt\\.?|amount)\\s+due)\\s*(?:of|is|:|-)?\\s*<AMOUNT>",
+      "<AMOUNT>\\s*(?:is\\s+)?(?:the\\s+)?(?:bill\\s+amount|amount\\s+due)\\b"
+    ],
+    "promised_cashback": [
+      "\\b(?:get|earn)?\\s*(?:assured|flat|up\\s*to|upto)\\s*<AMOUNT>",
+      "\\bcashback(?:\\s+of)?\\s*[:\\-]?\\s*<AMOUNT>",
+      "<AMOUNT>\\s*(?:monthly\\s+)?cashback\\b"
+    ],
+    "transaction_amount": [
+      "\\b(?:debited(?:\\s+by)?|sent|spent|paid|payment\\s+of|debit\\s+of|withdrawn|charged|received|credited\\s+by|refund\\s+of|refunded|transferred|recharge\\s+of|transaction\\s+for)\\s*<AMOUNT>",
+      "<AMOUNT>\\s*(?:was\\s+|is\\s+|has\\s+been\\s+)?(?:debited|spent|paid|withdrawn|charged|credited|received|refunded|transferred)\\b"
+    ]
+  }
+}

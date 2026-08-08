@@ -41,3 +41,14 @@ yarn-error.*
 
 # typescript
 *.tsbuildinfo
+
+# ── Personal financial data — NEVER commit (this repo is public) ──
+# Generated from ~/Desktop/spend_backup by tools/import_legacy.mjs
+staging.sqlite
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+# Real bank SMS: contains account masks, UPI handles, names, reference numbers.
+# Regenerate locally with: node tests/generate_sms_corpus.mjs
+tests/fixtures/sms_corpus.json
