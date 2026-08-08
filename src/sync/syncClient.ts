@@ -202,6 +202,7 @@ export class SpendSyncClient {
   private async pull(userId: string): Promise<number> {
     let cursor = await this.cursor();
     let total = 0;
+    let rejected = 0;
     for (let page = 0; page < 20; page += 1) {
       const response = await authenticatedFetch(`/v1/sync/pull?since=${encodeURIComponent(cursor)}`);
       if (!response.ok) throw new Error(`Sync pull failed (${response.status})`);
@@ -209,11 +210,20 @@ export class SpendSyncClient {
       const nextCursor = nextPullCursor(body.cursor, cursor);
       const ops = body.ops ?? [];
       const commands = ops.map(normalizeRemoteCommand).map((command) => JSON.stringify(command));
-      await nativeSync.applyPulledOps(JSON.stringify(commands), nextCursor, userId);
+      const applyReport = await nativeSync.applyPulledOps(JSON.stringify(commands), nextCursor, userId);
+      // A rejected op is data the server has and this device does not. It is
+      // skipped so one bad op cannot wedge sync forever, but it must never pass
+      // as success — an incomplete copy that reports "up to date" is the failure
+      // mode this whole sync path has been bitten by repeatedly.
+      rejected += countRejected(applyReport);
       total += ops.length;
-      if (ops.length === 0 || nextCursor === cursor) return total;
+      if (ops.length === 0 || nextCursor === cursor) {
+        if (rejected > 0) throw new Error(`${rejected} change${rejected === 1 ? "" : "s"} from the server could not be applied`);
+        return total;
+      }
       cursor = nextCursor;
     }
+    if (rejected > 0) throw new Error(`${rejected} change${rejected === 1 ? "" : "s"} from the server could not be applied`);
     return total;
   }
 
@@ -249,6 +259,22 @@ function deterministicOpId(entity: string, entityId: string): string {
   ].join("-");
 }
 
+
+/** The coordinator returns {applied, rejected}; older builds returned an array. */
+function countRejected(report: unknown): number {
+  if (typeof report !== "string") return 0;
+  try {
+    const parsed: unknown = JSON.parse(report);
+    if (parsed && typeof parsed === "object" && Array.isArray((parsed as { rejected?: unknown }).rejected)) {
+      const list = (parsed as { rejected: unknown[] }).rejected;
+      if (list.length > 0) console.warn("[sync] rejected ops", JSON.stringify(list).slice(0, 400));
+      return list.length;
+    }
+  } catch {
+    // An array (or anything else) means nothing was rejected.
+  }
+  return 0;
+}
 
 function toServerOperation(row: OutboxRow): SyncOperation {
   const command = parsePayload(row.payload);

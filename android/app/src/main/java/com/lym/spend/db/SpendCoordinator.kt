@@ -9,6 +9,7 @@ import com.lym.spend.classify.ClassifierTransactionInput
 import com.lym.spend.classify.ClassificationCandidate
 import com.lym.spend.classify.ClassificationTier
 import org.json.JSONArray
+import org.json.JSONObject
 import kotlin.math.min
 
 class SpendCoordinator private constructor(private val spendDatabase: SpendDatabase) {
@@ -76,30 +77,74 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
       nextAttempt
     }
 
-  /** Applies every pulled command and advances the cursor in one coordinator transaction. */
-  fun applyPulledOps(commandsJson: String, cursor: String, userId: String): String =
+  /**
+   * Applies every pulled command, then advances the cursor.
+   *
+   * Each command commits in its OWN transaction. This used to be a single
+   * transaction around the whole batch, which meant one command that could not
+   * apply — a constraint the server tolerates and this schema does not — rolled
+   * back every other command AND the cursor with it. Sync then retried the same
+   * batch forever, hitting the same wall: the app said "Backup paused, will
+   * retry automatically" indefinitely while nothing moved in either direction.
+   *
+   * A command that cannot apply is recorded as rejected and skipped rather than
+   * retried, because a poison op is otherwise permanent. It is counted and
+   * reported, never silently dropped: the caller surfaces the number so the data
+   * is known to be incomplete instead of quietly wrong.
+   */
+  fun applyPulledOps(commandsJson: String, cursor: String, userId: String): String {
     spendDatabase.writeTransaction { database ->
       val owner = metadata(database, OWNER_KEY)
       if (owner != userId) throw SyncOwnershipError(owner ?: "none", userId)
-      val commands = JSONArray(commandsJson)
-      val results = JSONArray()
-      for (index in 0 until commands.length()) {
-        val command = Command.fromJsonString(commands.getString(index))
-        val result = processedResult(database, command.commandId) ?: dispatch(database, command).also {
-          database.execSQL(
-            """INSERT INTO processed_commands (command_id, kind, result_json, created_at)
-               VALUES (?, ?, ?, ?)""",
-            arrayOf(command.commandId, command.kind, it.toJsonString(), System.currentTimeMillis()),
-          )
+    }
+    val commands = JSONArray(commandsJson)
+    val results = JSONArray()
+    val rejected = JSONArray()
+    for (index in 0 until commands.length()) {
+      val raw = commands.getString(index)
+      try {
+        val command = Command.fromJsonString(raw)
+        val result = spendDatabase.writeTransaction { database ->
+          processedResult(database, command.commandId) ?: dispatch(database, command).also {
+            database.execSQL(
+              """INSERT INTO processed_commands (command_id, kind, result_json, created_at)
+                 VALUES (?, ?, ?, ?)""",
+              arrayOf(command.commandId, command.kind, it.toJsonString(), System.currentTimeMillis()),
+            )
+          }
         }
         results.put(result.toJsonString())
+      } catch (error: Throwable) {
+        val detail = JSONObject()
+          .put("error", error.message ?: error::class.java.simpleName)
+          .put("command", raw.take(300))
+        rejected.put(detail)
+        // Mark it processed so the next pull does not stop on it again. The
+        // rejection is reported upward, so this is a decision the user can see
+        // rather than a silent discard.
+        runCatching {
+          val commandId = JSONObject(raw).optString("commandId", "")
+          if (commandId.isNotEmpty()) spendDatabase.writeTransaction { database ->
+            database.execSQL(
+              """INSERT OR IGNORE INTO processed_commands (command_id, kind, result_json, created_at)
+                 VALUES (?, ?, ?, ?)""",
+              arrayOf(commandId, "rejected", detail.toString(), System.currentTimeMillis()),
+            )
+          }
+        }
       }
+    }
+    spendDatabase.writeTransaction { database ->
       database.execSQL(
         "INSERT OR REPLACE INTO sync_metadata (key, value) VALUES (?, ?)",
         arrayOf(CURSOR_KEY, cursor),
       )
-      results.toString()
     }
+    return JSONObject()
+      .put("applied", results)
+      .put("rejected", rejected)
+      .toString()
+  }
 
   fun deadLetterCount(): Int = spendDatabase.read { database ->
     scalarInt(database, "SELECT COUNT(*) FROM outbox WHERE dead_lettered = 1", emptyArray()) ?: 0
