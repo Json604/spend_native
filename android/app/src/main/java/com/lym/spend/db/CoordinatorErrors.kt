@@ -17,3 +17,6 @@ class AllocationInvariantError(
 )
 
 class RowNotFoundError(val entityId: String) : NoSuchElementException("Row not found: $entityId")
+
+class SyncOwnershipError(val ownerId: String, val requestedUserId: String) :
+  IllegalStateException("Local data belongs to another account: $ownerId; requested $requestedUserId")

@@ -48,6 +48,69 @@ class SpendDatabaseModule(reactContext: ReactApplicationContext) :
     }
   }
 
+  @ReactMethod
+  fun claimLocalData(userId: String, deviceId: String, promise: Promise) {
+    executor.execute {
+      try {
+        promise.resolve(
+          SpendCoordinator.getInstance(reactApplicationContext).claimLocalData(userId, deviceId),
+        )
+      } catch (error: Throwable) {
+        rejectCommandError(promise, error)
+      }
+    }
+  }
+
+  @ReactMethod
+  fun acknowledgeOutbox(idsJson: String, promise: Promise) {
+    executor.execute {
+      try {
+        promise.resolve(SpendCoordinator.getInstance(reactApplicationContext).acknowledgeOutbox(idsJson))
+      } catch (error: Throwable) {
+        rejectCommandError(promise, error)
+      }
+    }
+  }
+
+  @ReactMethod
+  fun recordOutboxFailure(id: String, errorMessage: String, maxAttempts: Int, promise: Promise) {
+    executor.execute {
+      try {
+        promise.resolve(
+          SpendCoordinator.getInstance(reactApplicationContext)
+            .recordOutboxFailure(id, errorMessage, maxAttempts),
+        )
+      } catch (error: Throwable) {
+        rejectCommandError(promise, error)
+      }
+    }
+  }
+
+  @ReactMethod
+  fun applyPulledOps(commandsJson: String, cursor: String, userId: String, promise: Promise) {
+    executor.execute {
+      try {
+        promise.resolve(
+          SpendCoordinator.getInstance(reactApplicationContext)
+            .applyPulledOps(commandsJson, cursor, userId),
+        )
+      } catch (error: Throwable) {
+        rejectCommandError(promise, error)
+      }
+    }
+  }
+
+  @ReactMethod
+  fun getDeadLetterCount(promise: Promise) {
+    executor.execute {
+      try {
+        promise.resolve(SpendCoordinator.getInstance(reactApplicationContext).deadLetterCount())
+      } catch (error: Throwable) {
+        rejectCommandError(promise, error)
+      }
+    }
+  }
+
   private fun parseSelectionArgs(paramsJson: String): Array<String> {
     val params = JSONArray(paramsJson)
     return Array(params.length()) { index ->
@@ -97,6 +160,14 @@ class SpendDatabaseModule(reactContext: ReactApplicationContext) :
         error.message,
         Arguments.createMap().apply { putString("entityId", error.entityId) },
       )
+      is SyncOwnershipError -> promise.reject(
+        SYNC_OWNERSHIP,
+        error.message,
+        Arguments.createMap().apply {
+          putString("ownerId", error.ownerId)
+          putString("requestedUserId", error.requestedUserId)
+        },
+      )
       else -> promise.reject(code, error.message, error)
     }
   }
@@ -106,6 +177,7 @@ class SpendDatabaseModule(reactContext: ReactApplicationContext) :
     const val CONFLICT = "CONFLICT"
     const val ALLOCATION_INVARIANT = "ALLOCATION_INVARIANT"
     const val ROW_NOT_FOUND = "ROW_NOT_FOUND"
+    const val SYNC_OWNERSHIP = "SYNC_OWNERSHIP"
     const val READ_ONLY_VIOLATION = "READ_ONLY_VIOLATION"
     internal const val EXECUTE_FAILED = "EXECUTE_FAILED"
     private const val QUERY_FAILED = "QUERY_FAILED"
@@ -118,6 +190,7 @@ internal fun errorCodeFor(error: Throwable): String = when (error) {
   is ConflictError -> SpendDatabaseModule.CONFLICT
   is AllocationInvariantError -> SpendDatabaseModule.ALLOCATION_INVARIANT
   is RowNotFoundError -> SpendDatabaseModule.ROW_NOT_FOUND
+  is SyncOwnershipError -> SpendDatabaseModule.SYNC_OWNERSHIP
   is ReadOnlyViolation -> SpendDatabaseModule.READ_ONLY_VIOLATION
   else -> SpendDatabaseModule.EXECUTE_FAILED
 }

@@ -16,6 +16,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import MaterialCommunityIcons from "react-native-vector-icons/MaterialCommunityIcons";
 
 import { useSpend } from "../store/SpendProvider";
+import { useAuth } from "../../../auth/AuthProvider";
 import { accountingMonthKey, previousAccountingMonthKey, spendMonthLabel } from "../store/sqliteRepository";
 import SpendTodayHeroCard from "../components/SpendTodayHeroCard";
 import SpendBudgetCard from "../components/SpendBudgetCard";
@@ -43,6 +44,7 @@ export default function SpendMain() {
     dailyBuckets,
     actions,
   } = useSpend();
+  const { user, signIn, signOut } = useAuth();
 
   const [refreshing, setRefreshing] = useState(false);
   const [reviewModalVisible, setReviewModalVisible] = useState(false);
@@ -209,7 +211,25 @@ export default function SpendMain() {
         }
         showsVerticalScrollIndicator={false}
       >
-        <Text style={styles.pageTitle}>Spend</Text>
+        <View style={styles.titleRow}>
+          <Text style={styles.pageTitle}>Spend</Text>
+          <Pressable
+            accessibilityLabel={user ? "Sign out" : "Sign in with Google"}
+            onPress={async () => {
+              try {
+                if (user) await signOut();
+                else await signIn();
+              } catch {
+                // AuthProvider already explains sign-in failures. Keep offline
+                // spend capture usable even when account auth is unavailable.
+              }
+            }}
+            style={styles.accountButton}
+          >
+            <MaterialCommunityIcons name={user ? "account-check-outline" : "google"} size={17} color="#FFD27A" />
+            <Text style={styles.accountButtonText}>{user ? "Account" : "Sign in"}</Text>
+          </Pressable>
+        </View>
 
         <SpendMonthPager monthKey={selectedMonth} months={monthChoices} onSelect={setSelectedMonth} />
         {selectedMonth < accountingMonthKey() ? (
@@ -415,6 +435,7 @@ export default function SpendMain() {
 const styles = StyleSheet.create({
   page: { flex: 1, backgroundColor: "#070709" },
   content: { paddingHorizontal: 18 },
+  titleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   readOnlyHint: { color: "#9C8B5C", fontSize: 12, marginTop: 8 },
   cardSlot: { marginBottom: 18 },
   pageTitle: {
@@ -424,6 +445,17 @@ const styles = StyleSheet.create({
     letterSpacing: -0.5,
     marginBottom: 18,
   },
+  accountButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderWidth: 1,
+    borderColor: "rgba(255,210,122,0.28)",
+    borderRadius: 999,
+    paddingVertical: 8,
+    paddingHorizontal: 11,
+  },
+  accountButtonText: { color: "#FFD27A", fontSize: 12, fontWeight: "600" },
   fab: {
     position: "absolute",
     right: 24,

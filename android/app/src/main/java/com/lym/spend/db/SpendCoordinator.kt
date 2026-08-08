@@ -8,6 +8,8 @@ import com.lym.spend.classify.ClassifierCascade
 import com.lym.spend.classify.ClassifierTransactionInput
 import com.lym.spend.classify.ClassificationCandidate
 import com.lym.spend.classify.ClassificationTier
+import org.json.JSONArray
+import kotlin.math.min
 
 class SpendCoordinator private constructor(private val spendDatabase: SpendDatabase) {
   private val classifierCascade = ClassifierCascade(spendDatabase.applicationContext)
@@ -27,6 +29,80 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
       arrayOf(command.commandId, command.kind, result.toJsonString(), System.currentTimeMillis()),
     )
     result
+  }
+
+  /** Claims pre-login local data without creating a sync operation of its own. */
+  fun claimLocalData(userId: String, deviceId: String): String = spendDatabase.writeTransaction { database ->
+    val owner = metadata(database, OWNER_KEY)
+    if (owner != null && owner != userId) throw SyncOwnershipError(owner, userId)
+    if (owner == null) {
+      database.execSQL(
+        "INSERT INTO sync_metadata (key, value) VALUES (?, ?)",
+        arrayOf(OWNER_KEY, userId),
+      )
+    }
+    // Offline commands use the provisional device id. Bind them to the stable
+    // installation id when the account is first claimed (or reclaimed).
+    database.execSQL(
+      "UPDATE outbox SET device_id = ? WHERE device_id = 'local'",
+      arrayOf(deviceId),
+    )
+    owner ?: "claimed"
+  }
+
+  fun acknowledgeOutbox(idsJson: String): Int = spendDatabase.writeTransaction { database ->
+    val ids = JSONArray(idsJson)
+    var removed = 0
+    for (index in 0 until ids.length()) {
+      removed += database.delete("outbox", "id = ?", arrayOf(ids.getString(index)))
+    }
+    removed
+  }
+
+  fun recordOutboxFailure(id: String, error: String, maxAttempts: Int): Int =
+    spendDatabase.writeTransaction { database ->
+      val attempt = scalarInt(database, "SELECT attempt_count FROM outbox WHERE id = ?", arrayOf(id))
+        ?: return@writeTransaction 0
+      val nextAttempt = attempt + 1
+      val deadLettered = if (nextAttempt >= maxAttempts) 1 else 0
+      val exponent = min(nextAttempt - 1, 10)
+      val backoff = min(7L * 24 * 60 * 60 * 1000, 5_000L * (1L shl exponent))
+      database.execSQL(
+        """UPDATE outbox
+           SET attempt_count = ?, last_error = ?, dead_lettered = ?, next_attempt_at = ?
+           WHERE id = ?""",
+        arrayOf(nextAttempt, error.take(1_000), deadLettered, System.currentTimeMillis() + backoff, id),
+      )
+      nextAttempt
+    }
+
+  /** Applies every pulled command and advances the cursor in one coordinator transaction. */
+  fun applyPulledOps(commandsJson: String, cursor: String, userId: String): String =
+    spendDatabase.writeTransaction { database ->
+      val owner = metadata(database, OWNER_KEY)
+      if (owner != userId) throw SyncOwnershipError(owner ?: "none", userId)
+      val commands = JSONArray(commandsJson)
+      val results = JSONArray()
+      for (index in 0 until commands.length()) {
+        val command = Command.fromJsonString(commands.getString(index))
+        val result = processedResult(database, command.commandId) ?: dispatch(database, command).also {
+          database.execSQL(
+            """INSERT INTO processed_commands (command_id, kind, result_json, created_at)
+               VALUES (?, ?, ?, ?)""",
+            arrayOf(command.commandId, command.kind, it.toJsonString(), System.currentTimeMillis()),
+          )
+        }
+        results.put(result.toJsonString())
+      }
+      database.execSQL(
+        "INSERT OR REPLACE INTO sync_metadata (key, value) VALUES (?, ?)",
+        arrayOf(CURSOR_KEY, cursor),
+      )
+      results.toString()
+    }
+
+  fun deadLetterCount(): Int = spendDatabase.read { database ->
+    scalarInt(database, "SELECT COUNT(*) FROM outbox WHERE dead_lettered = 1", emptyArray()) ?: 0
   }
 
   /**
@@ -481,6 +557,11 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
       CommandResult.fromJsonString(it.getString(0))
     }
 
+  private fun metadata(database: SQLiteDatabase, key: String): String? =
+    querySingle(database, "SELECT value FROM sync_metadata WHERE key = ?", arrayOf(key)) {
+      it.getString(0)
+    }
+
   private fun transaction(database: SQLiteDatabase, id: String): TransactionRow =
     querySingle(
       database,
@@ -775,6 +856,8 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
   }
 
   companion object {
+    private const val OWNER_KEY = "owner_id"
+    private const val CURSOR_KEY = "pull_cursor"
     @Volatile
     private var instance: SpendCoordinator? = null
 
@@ -783,6 +866,7 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
         instance ?: SpendCoordinator(SpendDatabase.getInstance(context)).also { instance = it }
       }
   }
+
 }
 
 private data class TransactionRow(

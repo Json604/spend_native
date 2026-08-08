@@ -39,6 +39,31 @@ object Migrations {
       }
       currentVersion = migration.version
     }
+    ensureSyncSchema(database)
+  }
+
+  private fun ensureSyncSchema(database: SQLiteDatabase) {
+    database.execSQL(
+      """CREATE TABLE IF NOT EXISTS sync_metadata (
+           key TEXT PRIMARY KEY,
+           value TEXT NOT NULL
+         )""",
+    )
+    val hasRetryColumn = database.rawQuery("PRAGMA table_info(outbox)", emptyArray()).use { cursor ->
+      val nameIndex = cursor.getColumnIndex("name")
+      var found = false
+      while (cursor.moveToNext()) {
+        if (cursor.getString(nameIndex) == "next_attempt_at") found = true
+      }
+      found
+    }
+    if (!hasRetryColumn) {
+      database.execSQL("ALTER TABLE outbox ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0")
+    }
+    database.execSQL(
+      """CREATE INDEX IF NOT EXISTS outbox_ready_created_at_idx
+         ON outbox (dead_lettered, next_attempt_at, created_at)""",
+    )
   }
 
   internal fun loadMigrationChain(context: Context): List<Migration> {

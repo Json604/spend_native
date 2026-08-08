@@ -62,3 +62,9 @@ android/app/src/main/assets/migrations/
 *.keystore
 !android/app/debug.keystore
 *.keystore.password
+
+# Google OAuth downloads. The web client JSON contains a real client_secret.
+# We never need it: the app gets an ID token, the server verifies it against
+# Google's JWKS, and only the client *ID* is required — which is public.
+client_secret_*.json
+google-services.json

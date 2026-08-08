@@ -16,6 +16,7 @@ import com.facebook.soloader.SoLoader
 import com.lym.spend.widget.SpendWidgetBridgePackage
 import com.lym.spend.sms.SpendSmsPackage
 import com.lym.spend.db.SpendDatabasePackage
+import com.lym.spend.auth.SecureTokenStorePackage
 
 class MainApplication : Application(), ReactApplication {
 
@@ -26,6 +27,7 @@ class MainApplication : Application(), ReactApplication {
               add(SpendWidgetBridgePackage())
               add(SpendSmsPackage())
               add(SpendDatabasePackage())
+              add(SecureTokenStorePackage())
             }
 
         override fun getJSMainModuleName(): String = "index"

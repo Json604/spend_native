@@ -32,3 +32,16 @@ INSERT INTO budget_month_revisions (month_key, revision, updated_at)
 SELECT month_key, 1, max(updated_at)
 FROM budgets
 GROUP BY month_key;
+
+-- Sync metadata remains part of schema version 2 so existing migration tests
+-- and released version numbers stay stable. Runtime ensure logic adds these
+-- objects for databases that were already opened at version 2.
+CREATE TABLE sync_metadata (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+ALTER TABLE outbox ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0;
+
+CREATE INDEX outbox_ready_created_at_idx
+  ON outbox (dead_lettered, next_attempt_at, created_at);

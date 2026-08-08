@@ -170,6 +170,20 @@ function applyMigrations(db: DatabaseSync): void {
       throw error;
     }
   }
+  ensureSyncSchema(db);
+}
+
+function ensureSyncSchema(db: DatabaseSync): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS sync_metadata (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  )`);
+  const columns = db.prepare("PRAGMA table_info(outbox)").all() as Array<{ name: string }>;
+  if (!columns.some((column) => column.name === "next_attempt_at")) {
+    db.exec("ALTER TABLE outbox ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0");
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS outbox_ready_created_at_idx
+    ON outbox (dead_lettered, next_attempt_at, created_at)`);
 }
 
 function configureConnection(db: DatabaseSync): void {

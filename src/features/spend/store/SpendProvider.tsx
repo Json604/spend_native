@@ -39,6 +39,8 @@ import {
   startOfTodayMillis,
 } from "../services/smsIngestion";
 import { consumePendingSmsRefreshFlag } from "../services/smsNativeModule";
+import { useAuth } from "../../../auth/AuthProvider";
+import { syncClient } from "../../../sync/syncClient";
 
 const SpendContext = createContext<SpendContextType | undefined>(undefined);
 
@@ -179,6 +181,7 @@ function buildLoadedData(
 }
 
 export function SpendProvider({ children }: { children: ReactNode }) {
+  const { user } = useAuth();
   const repository = sqliteRepository;
   const [selectedMonth, setSelectedMonth] = useState(accountingMonthKey());
   const [loaded, setLoaded] = useState<LoadedSpendData | null>(null);
@@ -188,6 +191,21 @@ export function SpendProvider({ children }: { children: ReactNode }) {
   const updateSyncState = useCallback((source: SpendSourceKind, patch: Partial<SpendSyncState>) => {
     setSyncStates((current) => current.map((item) => item.source === source ? { ...item, ...patch } : item));
   }, []);
+
+  const syncAccount = useCallback(async () => {
+    if (!user) return;
+    updateSyncState("gmail", { status: "syncing", detail: "Syncing your account across devices." });
+    const report = await syncClient.sync();
+    updateSyncState("gmail", {
+      status: report.error ? "error" : "ready",
+      detail: report.error
+        ? `${report.error}${report.deadLetterCount ? ` ${report.deadLetterCount} operation${report.deadLetterCount === 1 ? "" : "s"} need attention.` : ""}`
+        : report.deadLetterCount
+          ? `${report.deadLetterCount} operation${report.deadLetterCount === 1 ? "" : "s"} need attention.`
+          : "Account sync is up to date.",
+      lastSyncedAt: new Date().toISOString(),
+    });
+  }, [updateSyncState, user]);
 
   const reload = useCallback(async (monthKey = selectedMonth) => {
     const [summary, breakdown, previousBreakdown, transactions, review, budget, daily, categories] = await Promise.all([
@@ -362,6 +380,18 @@ export function SpendProvider({ children }: { children: ReactNode }) {
     });
     return () => { smsSubscription.remove(); appStateSubscription.remove(); };
   }, [loading, refreshSmsInboxToday]);
+
+  useEffect(() => {
+    if (!user) return;
+    syncAccount().catch((error) => updateSyncState("gmail", {
+      status: "error",
+      detail: error instanceof Error ? error.message : String(error),
+    }));
+    const subscription = AppState.addEventListener("change", (state) => {
+      if (state === "active") syncAccount().catch(() => undefined);
+    });
+    return () => subscription.remove();
+  }, [syncAccount, updateSyncState, user]);
 
   const value = useMemo((): SpendContextType => {
     const data = loaded ?? buildLoadedData(selectedMonth, syncStates, [], [], [], [], { totalSpentMinor: 0, budgetTotalMinor: 0, daysRemaining: 0, transactionCount: 0, reviewCount: 0 }, [], null, []);
