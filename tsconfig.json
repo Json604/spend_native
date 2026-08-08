@@ -1,19 +1,30 @@
 {
-  "extends": "expo/tsconfig.base",
+  "extends": "@react-native/typescript-config",
   "compilerOptions": {
     "strict": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
     "baseUrl": ".",
     "paths": {
       "@/*": [
         "src/*"
       ]
-    }
+    },
+    "types": [
+      "node"
+    ]
   },
   "include": [
     "**/*.ts",
-    "**/*.tsx",
-    ".expo/types/**/*.d.ts"
+    "**/*.tsx"
+  ],
+  "exclude": [
+    "node_modules",
+    "android",
+    "ios"
   ]
 }
