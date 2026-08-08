@@ -44,7 +44,7 @@ export default function ManualEntrySheet() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
   const route = useRoute<ManualEntryRoute>();
-  const { actions, categoryOptions } = useSpend();
+  const { actions, categoryOptions, currentMonthBudget } = useSpend();
 
   const forDate = useMemo(() => {
     const param = route.params?.forDate;
@@ -87,6 +87,23 @@ export default function ManualEntrySheet() {
         .sort((a, b) => a.label.localeCompare(b.label)),
     [categoryOptions],
   );
+
+  /**
+   * The chips offer THIS MONTH's categories, not every category that has ever
+   * existed. Budgets are per-month now, so the full list drags along last
+   * month's one-offs and every typo ever made — dozens of chips to hunt
+   * through for the handful actually in play. Anything missing can still be
+   * typed below, and an existing name resolves to that category rather than
+   * creating a duplicate.
+   *
+   * With nothing budgeted there is nothing to narrow to, so fall back to the
+   * full list rather than showing an empty picker.
+   */
+  const monthOptions = useMemo(() => {
+    const budgeted = currentMonthBudget?.categoryBudgets ?? {};
+    const inThisMonth = categoryOptions.filter((opt) => (budgeted[opt.id] ?? 0) > 0);
+    return inThisMonth.length > 0 ? inThisMonth : categoryOptions;
+  }, [categoryOptions, currentMonthBudget]);
 
   const trimmedCustom = customLabel.trim();
   // The custom input is the source of truth when filled; otherwise, fall back

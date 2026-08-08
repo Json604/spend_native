@@ -46,7 +46,6 @@ export type SpendCategoryPreview = {
   spentMinor?: number;
   budgetMinor?: number;
   pct?: number;
-  deltaMinor?: number;
   parentId?: SpendCategoryId;
   depth?: number; // 0 = root, 1 = child, ...
 };

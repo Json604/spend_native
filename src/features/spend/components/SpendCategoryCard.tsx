@@ -63,12 +63,6 @@ export default function SpendCategoryCard({ categories }: SpendCategoryCardProps
                 )}
               </Text>
 
-              {category.deltaMinor !== undefined && category.deltaMinor !== 0 ? (
-                <Text style={styles.delta}>
-                  {category.deltaMinor > 0 ? "↑" : "↓"} {spendCurrency(Math.abs(category.deltaMinor))} vs previous month
-                </Text>
-              ) : null}
-
               <View style={[styles.track, isChild && styles.trackChild]}>
                 <View
                   style={[
@@ -160,7 +154,6 @@ const styles = StyleSheet.create({
   amountSubtle: {
     color: "rgba(255,255,255,0.5)",
   },
-  delta: { color: "rgba(255,210,122,0.72)", fontSize: 11, marginLeft: 20 },
   track: {
     height: 8,
     borderRadius: 999,

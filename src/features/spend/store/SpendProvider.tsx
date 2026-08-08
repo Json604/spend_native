@@ -84,13 +84,11 @@ function buildLoadedData(
   transactions: SpendTransaction[],
   categories: Awaited<ReturnType<SqliteSpendRepository["categories"]>>,
   breakdown: Awaited<ReturnType<SqliteSpendRepository["categoryBreakdown"]>>,
-  previousBreakdown: Awaited<ReturnType<SqliteSpendRepository["categoryBreakdown"]>>,
   summaryRow: Awaited<ReturnType<SqliteSpendRepository["monthSummary"]>>,
   reviewTransactions: SpendTransaction[],
   budget: SpendContextType["currentMonthBudget"],
   dailyBuckets: SpendContextType["dailyBuckets"],
 ): LoadedSpendData {
-  const previousSpent = new Map(previousBreakdown.map((row) => [row.categoryId, row.spentMinor]));
   const summaryBase = {
     monthLabel: spendMonthLabel(monthKey),
     totalMinor: summaryRow.totalSpentMinor,
@@ -133,10 +131,6 @@ function buildLoadedData(
       spentMinor: row.spentMinor,
       budgetMinor: row.budgetedMinor > 0 ? row.budgetedMinor : undefined,
       pct: row.budgetedMinor > 0 ? row.spentMinor / row.budgetedMinor : 0,
-      // undefined means "no comparable previous month", which the card skips.
-      deltaMinor: previousSpent.has(row.categoryId)
-        ? row.spentMinor - (previousSpent.get(row.categoryId) ?? 0)
-        : undefined,
       parentId: row.parentId,
       depth: row.parentId ? 1 : 0,
     }));
@@ -251,10 +245,9 @@ export function SpendProvider({ children }: { children: ReactNode }) {
   );
 
   const reload = useCallback(async (monthKey = selectedMonth) => {
-    const [summary, breakdown, previousBreakdown, transactions, review, budget, daily, categories] = await Promise.all([
+    const [summary, breakdown, transactions, review, budget, daily, categories] = await Promise.all([
       repository.monthSummary(monthKey),
       repository.categoryBreakdown(monthKey),
-      repository.categoryBreakdown(previousAccountingMonthKey(monthKey)),
       repository.transactionsForMonth(monthKey),
       repository.needsReview(monthKey),
       repository.budgetsForMonth(monthKey),
@@ -262,7 +255,7 @@ export function SpendProvider({ children }: { children: ReactNode }) {
       repository.categories(monthKey),
     ]);
     repository.monthsWithData().then(setAvailableMonths).catch(() => undefined);
-    setLoaded(buildLoadedData(monthKey, syncStates, transactions, categories, breakdown, previousBreakdown, summary, review, budget, daily));
+    setLoaded(buildLoadedData(monthKey, syncStates, transactions, categories, breakdown, summary, review, budget, daily));
     setDataRevision((revision) => revision + 1);
   }, [repository, selectedMonth, syncStates]);
 
@@ -496,7 +489,7 @@ export function SpendProvider({ children }: { children: ReactNode }) {
   }, [syncAccount, updateSyncState, user]);
 
   const value = useMemo((): SpendContextType => {
-    const data = loaded ?? buildLoadedData(selectedMonth, syncStates, [], [], [], [], { totalSpentMinor: 0, budgetTotalMinor: 0, daysRemaining: 0, transactionCount: 0, reviewCount: 0 }, [], null, []);
+    const data = loaded ?? buildLoadedData(selectedMonth, syncStates, [], [], [], { totalSpentMinor: 0, budgetTotalMinor: 0, daysRemaining: 0, transactionCount: 0, reviewCount: 0 }, [], null, []);
     return {
       repository,
       domain: data.domain,

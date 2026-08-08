@@ -42,7 +42,6 @@ const parseAmount = (value: string): number | null => {
 type SortMode = "amount" | "name" | "percent";
 type PlannerOption = SpendCategoryOption & {
   spentMinor: number;
-  deltaMinor: number;
   budgetMinor: number;
   recurring: boolean;
 };
@@ -130,7 +129,6 @@ export default function BudgetPlanner() {
       return {
         ...option,
         spentMinor: preview?.spentMinor ?? 0,
-        deltaMinor: preview?.deltaMinor ?? 0,
         budgetMinor,
         recurring: recurring[option.id] ?? false,
       };
@@ -444,7 +442,6 @@ export default function BudgetPlanner() {
 
     const option = item.option;
     const pct = option.budgetMinor > 0 ? option.spentMinor / option.budgetMinor : 0;
-    const delta = option.deltaMinor;
     return (
       <Pressable style={styles.childRow} onPress={() => openEditor(option)}>
         <View style={[styles.dot, { backgroundColor: option.tint }]} />
@@ -456,7 +453,6 @@ export default function BudgetPlanner() {
           <Text style={styles.meta}>
             {spendCurrency(option.spentMinor)} spent {option.budgetMinor > 0 ? `· ${spendCurrency(option.budgetMinor)} budget` : "· no budget"}
             {option.recurring ? " · recurring" : ""}
-            {delta !== 0 ? ` · ${delta > 0 ? "↑" : "↓"} ${spendCurrency(Math.abs(delta))} vs last month` : ""}
           </Text>
         </View>
         <View style={styles.amountBlock}>
