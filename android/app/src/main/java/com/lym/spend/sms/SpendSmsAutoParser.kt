@@ -1,109 +1,108 @@
 package com.lym.spend.sms
 
+/** Minimal native counterpart to src/parser: classify first, then role every amount. */
 data class ParsedIncomingSmsTransaction(
-  val amountMinor: Int,
+  val amountMinor: Long,
   val categoryLabel: String?,
-  val dedupeKey: String,
   val occurredAtMillis: Long,
 )
 
+enum class SmsMessageClassification {
+  POSTED_DEBIT, POSTED_CREDIT, PENDING, REVERSAL, MANDATE_SETUP,
+  BALANCE_ONLY, MARKETING, SECURITY, UNKNOWN,
+}
+
+enum class SmsMonetaryRole {
+  TRANSACTION_AMOUNT, AVAILABLE_BALANCE, CREDIT_LIMIT, PROMISED_CASHBACK,
+  BILL_AMOUNT, MINIMUM_DUE, EMI_AMOUNT, UNKNOWN,
+}
+
+data class SmsParseResult(
+  val classification: SmsMessageClassification,
+  val transaction: ParsedIncomingSmsTransaction?,
+  val parseStatus: String,
+)
+
+private data class MonetarySpan(val amountMinor: Long, val role: SmsMonetaryRole)
+
 object SpendSmsAutoParser {
-  private val amountRegex =
-    Regex("""(?:rs\.?|inr|₹|amt\.?|amount)\s*[:\-]?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)""", RegexOption.IGNORE_CASE)
-  private val debitPatterns = listOf(
-    Regex("""\bdebited\b""", RegexOption.IGNORE_CASE),
-    Regex("""\bspent\b""", RegexOption.IGNORE_CASE),
-    Regex("""\bpaid\b""", RegexOption.IGNORE_CASE),
-    Regex("""\bpurchase\b""", RegexOption.IGNORE_CASE),
-    Regex("""\bsent\b""", RegexOption.IGNORE_CASE),
-    Regex("""\btransaction\b""", RegexOption.IGNORE_CASE),
-    Regex("""\btxn\b""", RegexOption.IGNORE_CASE),
-    Regex("""\bupi\b""", RegexOption.IGNORE_CASE),
-    Regex("""\bcard\b""", RegexOption.IGNORE_CASE),
-    Regex("""\bdr\b""", RegexOption.IGNORE_CASE),
-    Regex("""\bdebit\b""", RegexOption.IGNORE_CASE),
-    Regex("""\bwithdrawn\b""", RegexOption.IGNORE_CASE),
-    Regex("""\bcharged\b""", RegexOption.IGNORE_CASE),
-    Regex("""\bimps\b""", RegexOption.IGNORE_CASE),
-    Regex("""\bneft\b""", RegexOption.IGNORE_CASE),
-    Regex("""\brtgs\b""", RegexOption.IGNORE_CASE),
-    Regex("""\bautopay\b""", RegexOption.IGNORE_CASE),
-  )
-  private val creditPatterns = listOf(
-    Regex("""\bcredited\b""", RegexOption.IGNORE_CASE),
-    Regex("""\breceived\b""", RegexOption.IGNORE_CASE),
-    Regex("""\brefund(?:ed)?\b""", RegexOption.IGNORE_CASE),
-    Regex("""\bdeposit(?:ed)?\b""", RegexOption.IGNORE_CASE),
-    Regex("""\bcredit\b""", RegexOption.IGNORE_CASE),
-    Regex("""\bcr\b""", RegexOption.IGNORE_CASE),
-  )
-  private val transactionSenderPatterns = listOf(
-    Regex("""kotak|hdfc|icici|sbi|axis|idfc|yes|indus|federal|canara|pnb|rbl|bob|boi|union|bank|upi|card|paytm|phonepe|gpay|bhim""", RegexOption.IGNORE_CASE),
+  private val amountRegex = Regex(
+    """(?:₹|(?:rs|inr|mrp|amt|amount)\.?)\s*[:\-]?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)(?:\s*(lakh|lac|crore|k))?""",
+    RegexOption.IGNORE_CASE,
   )
 
-  fun parse(
-    sender: String?,
-    body: String?,
-    timestamp: Long,
-  ): ParsedIncomingSmsTransaction? {
-    val rawBody = body?.replace("\\s+".toRegex(), " ")?.trim().orEmpty()
-    val rawSender = sender?.replace("\\s+".toRegex(), " ")?.trim().orEmpty()
+  // This ordered list mirrors the TypeScript classifier's safety-first intent.
+  private val classifiers = listOf(
+    SmsMessageClassification.SECURITY to """\botp\b|\bone[ -]?time password\b|\blog[ -]?in\b|\bpassword\b|\bkyc\b""",
+    SmsMessageClassification.MARKETING to """\bpre[ -]?approved\b|\blifetime free\b|\bget\s+up\s*to\b|\bapply\s+now\b|\blimited\s+period\b""",
+    SmsMessageClassification.REVERSAL to """\bfailed\b|\bdeclined\b|\bunsuccessful\b|\breversed\b|\bcould not be processed\b""",
+    SmsMessageClassification.MANDATE_SETUP to """\be[ -]?mandate\b|\bmandate\b|\bwill be debited\b|\bscheduled\b|\bcollect request\b""",
+    SmsMessageClassification.PENDING to """\bpending\b|\bawaiting\b|\bprocessing\b|\binitiated\b""",
+    SmsMessageClassification.POSTED_CREDIT to """\bcredited\s+(?:to|by)\b|\breceived\b[\s\S]{0,100}\bin your\b|\brefund(?:ed)?\s+(?:of|to)\b""",
+    SmsMessageClassification.POSTED_DEBIT to """\bdebited\b|\bdebit\s+of\b|\bsent\s+(?=(?:rs\.?|inr|₹)\s*\d)|\bspent\b|\bpaid\b|\bwithdrawn\b|\bcharged\b|\bpurchased?\b""",
+    SmsMessageClassification.BALANCE_ONLY to """\bavl\.?\s*bal\b|\bavailable\s+balance\b|\b(?:a/c|account)\s+balance\b|\bbalance\s+(?:is|as of)\b""",
+  ).map { (classification, pattern) -> classification to Regex(pattern, RegexOption.IGNORE_CASE) }
 
-    if (rawBody.isBlank()) {
-      return null
+  fun parse(sender: String?, body: String?, timestamp: Long): SmsParseResult {
+    val text = body?.replace(Regex("\\s+"), " ")?.trim().orEmpty()
+    if (text.isBlank()) return SmsParseResult(SmsMessageClassification.UNKNOWN, null, "empty")
+
+    // Deliberately before amount extraction: intent decides whether amounts matter.
+    val classification = classifiers.firstOrNull { it.second.containsMatchIn(text) }?.first
+      ?: SmsMessageClassification.UNKNOWN
+    val spans = amountRegex.findAll(text).map { match ->
+      MonetarySpan(parseAmountMinor(match.groupValues[1], match.groupValues[2]), roleFor(text, match.range.first, match.range.last + 1))
+    }.filter { it.amountMinor > 0 }.toMutableList()
+
+    var transactionSpan = spans.firstOrNull { it.role == SmsMonetaryRole.TRANSACTION_AMOUNT }
+    if (transactionSpan == null && classification == SmsMessageClassification.POSTED_DEBIT) {
+      val unknown = spans.filter { it.role == SmsMonetaryRole.UNKNOWN }
+      if (unknown.size == 1) transactionSpan = unknown.single()
     }
-
-    val amountMatch = amountRegex.find(rawBody) ?: return null
-    val hasDebitSignal = debitPatterns.any { it.containsMatchIn(rawBody) }
-    val hasCreditSignal = creditPatterns.any { it.containsMatchIn(rawBody) }
-    val hasTransactionSender = transactionSenderPatterns.any { it.containsMatchIn(rawSender) }
-    val hasTransactionBody =
-      hasDebitSignal ||
-        hasCreditSignal ||
-        Regex("""\bupi\b|\btransaction\b|\btxn\b|\bpayment\b|\baccount\b|\ba/c\b|\bkotak\b|\bbank\b""", RegexOption.IGNORE_CASE)
-          .containsMatchIn(rawBody)
-
-    if (!hasTransactionSender && !hasTransactionBody) {
-      return null
+    if (classification == SmsMessageClassification.POSTED_DEBIT && transactionSpan != null) {
+      return SmsParseResult(
+        classification,
+        ParsedIncomingSmsTransaction(transactionSpan.amountMinor, inferCategory(text), timestamp),
+        "parsed",
+      )
     }
-
-    if (!hasDebitSignal || hasCreditSignal) {
-      return null
+    val status = when (classification) {
+      SmsMessageClassification.UNKNOWN -> "unknown_classification"
+      SmsMessageClassification.POSTED_DEBIT -> "missing_transaction_amount"
+      else -> "non_transaction_${classification.name.lowercase()}"
     }
+    return SmsParseResult(classification, null, status)
+  }
 
-    val amountMinor = parseAmountMinor(amountMatch.groupValues.getOrNull(1))
-
-    if (amountMinor <= 0) {
-      return null
-    }
-
-    return ParsedIncomingSmsTransaction(
-      amountMinor = amountMinor,
-      categoryLabel = inferCategory(rawBody),
-      dedupeKey = buildDedupeKey(rawSender, amountMinor, timestamp),
-      occurredAtMillis = timestamp,
+  private fun roleFor(text: String, start: Int, end: Int): SmsMonetaryRole {
+    val before = text.substring(maxOf(0, start - 80), start)
+    val after = text.substring(end, minOf(text.length, end + 80))
+    val context = "$before<AMOUNT>$after"
+    val roles = listOf(
+      SmsMonetaryRole.AVAILABLE_BALANCE to """(?:avl\.?\s*bal(?:ance)?|avail(?:able)?\s+bal(?:ance)?|bal(?:ance)?\.?).{0,24}<AMOUNT>|<AMOUNT>.{0,30}available\s+balance""",
+      SmsMonetaryRole.CREDIT_LIMIT to """(?:credit\s+limit|\blimit|eligibility).{0,24}<AMOUNT>|<AMOUNT>.{0,36}credit\s+limit""",
+      SmsMonetaryRole.MINIMUM_DUE to """minimum\s+(?:amount\s+)?due.{0,24}<AMOUNT>|<AMOUNT>.{0,32}minimum\s+(?:amount\s+)?due""",
+      SmsMonetaryRole.EMI_AMOUNT to """(?:emi|instalment|installment).{0,24}<AMOUNT>|<AMOUNT>.{0,24}(?:emi|instalment|installment)""",
+      SmsMonetaryRole.BILL_AMOUNT to """(?:bill(?:\s+(?:payment|amount))?|amount\s+due).{0,24}<AMOUNT>|<AMOUNT>.{0,32}(?:bill\s+amount|amount\s+due)""",
+      SmsMonetaryRole.PROMISED_CASHBACK to """cashback.{0,24}<AMOUNT>|<AMOUNT>.{0,24}cashback""",
+      SmsMonetaryRole.TRANSACTION_AMOUNT to """(?:debited(?:\s+by)?|sent|spent|paid|payment\s+of|debit\s+of|withdrawn|charged|received|credited\s+by|refund\s+of|refunded|transferred|recharge\s+of|transaction\s+for)\s*<AMOUNT>|<AMOUNT>\s*(?:was\s+|is\s+|has\s+been\s+)?(?:debited|spent|paid|withdrawn|charged|credited|received|refunded|transferred)""",
     )
+    return roles.firstOrNull { Regex(it.second, RegexOption.IGNORE_CASE).containsMatchIn(context) }?.first
+      ?: SmsMonetaryRole.UNKNOWN
   }
 
-  private fun parseAmountMinor(amountText: String?): Int {
-    val normalized = amountText?.replace(",", "")?.trim().orEmpty()
-    val parsed = normalized.toDoubleOrNull() ?: return 0
-    return (parsed * 100).toInt()
-  }
-
-  private fun inferCategory(rawBody: String): String? {
-    return when {
-      Regex("""swiggy|instamart""", RegexOption.IGNORE_CASE).containsMatchIn(rawBody) -> "Swiggy"
-      Regex("""zomato|blinkit""", RegexOption.IGNORE_CASE).containsMatchIn(rawBody) -> "Zomato"
-      Regex("""zepto""", RegexOption.IGNORE_CASE).containsMatchIn(rawBody) -> "Zepto"
-      Regex("""uber\s*eats|faasos|eat\.?sure|domino|pizza|behrouz|box8""", RegexOption.IGNORE_CASE)
-        .containsMatchIn(rawBody) -> "Other Food Apps"
-      else -> null
+  private fun parseAmountMinor(number: String, magnitude: String): Long {
+    val value = number.replace(",", "").toBigDecimalOrNull() ?: return 0
+    val multiplier = when (magnitude.lowercase()) {
+      "crore" -> 10_000_000L; "lakh", "lac" -> 100_000L; "k" -> 1_000L; else -> 1L
     }
+    return try { value.movePointRight(2).multiply(multiplier.toBigDecimal()).longValueExact() } catch (_: ArithmeticException) { 0 }
   }
 
-  private fun buildDedupeKey(sender: String, amountMinor: Int, timestamp: Long): String {
-    val minuteBucket = timestamp / 60000L
-    return "${sender.lowercase()}:${amountMinor}:${minuteBucket}"
+  private fun inferCategory(text: String): String? = when {
+    Regex("""swiggy|instamart""", RegexOption.IGNORE_CASE).containsMatchIn(text) -> "Swiggy"
+    Regex("""zomato|blinkit""", RegexOption.IGNORE_CASE).containsMatchIn(text) -> "Zomato"
+    Regex("""zepto""", RegexOption.IGNORE_CASE).containsMatchIn(text) -> "Zepto"
+    else -> null
   }
 }

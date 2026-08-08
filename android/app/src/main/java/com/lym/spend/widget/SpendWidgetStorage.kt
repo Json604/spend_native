@@ -1,6 +1,7 @@
 package com.lym.spend.widget
 
 import android.content.Context
+import com.lym.spend.db.SpendCoordinator
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -38,6 +39,39 @@ object SpendWidgetStorage {
         JSONObject(snapshotJson)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putString(KEY_SNAPSHOT, snapshotJson).apply()
+    }
+
+    /** Native SMS ingestion uses this so the widget does not wait for a JS VM. */
+    fun refreshFromDatabase(context: Context, coordinator: SpendCoordinator) {
+        val now = System.currentTimeMillis()
+        val monthKey = SimpleDateFormat("yyyy-MM", Locale.ROOT).format(Date(now))
+        val dayStart = now - (now % (24L * 60 * 60 * 1000))
+        val monthStart = SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).parse("$monthKey-01")!!.time
+        val previous = readSnapshot(context)
+        fun debitTotal(from: Long): Long = coordinator.query(
+            """SELECT COALESCE(SUM(amount_minor), 0) AS total FROM transactions
+               WHERE direction = 'debit' AND status = 'posted' AND occurred_at >= ?""",
+            arrayOf(from.toString()),
+        ).firstOrNull()?.get("total") as? Long ?: 0L
+        val categories = org.json.JSONArray().also { rows ->
+            previous.topCategories.forEach { row ->
+                rows.put(JSONObject().put("label", row.label).put("amountLabel", row.amountLabel))
+            }
+        }
+        val json = JSONObject()
+            .put("monthLabel", SimpleDateFormat("MMMM yyyy", Locale.getDefault()).format(Date(now)))
+            .put("todayFormatted", "₹${formatAmount(debitTotal(dayStart))}")
+            .put("monthSpentMinor", debitTotal(monthStart).coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+            .put("monthBudgetMinor", previous.monthBudgetMinor ?: JSONObject.NULL)
+            .put("daysRemainingInMonth", previous.daysRemainingInMonth)
+            .put("topCategories", categories)
+        writeSnapshotJson(context, json.toString())
+    }
+
+    private fun formatAmount(minor: Long): String {
+        val major = minor / 100
+        val paise = (minor % 100).toString().padStart(2, '0')
+        return "$major.$paise"
     }
 
     private fun parseSnapshot(json: JSONObject): Snapshot {

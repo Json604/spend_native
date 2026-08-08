@@ -61,6 +61,11 @@ data class NewAlertPayload(
   val parseStatus: String = "parsed",
 )
 
+data class UpdateAlertParseStatusPayload(
+  val alertId: String,
+  val parseStatus: String,
+)
+
 data class InitialAllocationPayload(
   val id: String? = null,
   val categoryId: String?,
@@ -141,6 +146,21 @@ sealed class Command(open val commandId: String, val kind: String) {
     val payload: CreateTransactionFromAlertPayload,
   ) : Command(commandId, KIND) {
     companion object { const val KIND = "createTransactionFromAlert" }
+  }
+
+  /** Stores an incoming provider alert before any parsing decision is made. */
+  data class RecordSourceAlert(
+    override val commandId: String,
+    val payload: NewAlertPayload,
+  ) : Command(commandId, KIND) {
+    companion object { const val KIND = "recordSourceAlert" }
+  }
+
+  data class UpdateAlertParseStatus(
+    override val commandId: String,
+    val payload: UpdateAlertParseStatusPayload,
+  ) : Command(commandId, KIND) {
+    companion object { const val KIND = "updateAlertParseStatus" }
   }
 
   data class AssignCategory(
@@ -249,6 +269,8 @@ sealed class Command(open val commandId: String, val kind: String) {
 
     when (this) {
       is CreateTransactionFromAlert -> json.put("payload", payload.toJson())
+      is RecordSourceAlert -> json.put("payload", payload.toJson())
+      is UpdateAlertParseStatus -> json.put("payload", payload.toJson())
       is AssignCategory -> json.put("expectedRevision", expectedRevision).put("payload", payload.toJson())
       is AcceptSuggestion -> json.put("expectedRevision", expectedRevision).put("payload", payload.toJson())
       is SetBudgetAmount -> json.put("expectedRevision", expectedRevision).put("payload", payload.toJson())
@@ -360,6 +382,10 @@ private fun CreateTransactionFromAlertPayload.toJson() = JSONObject()
   .put("alert", alert.toJson())
   .put("transaction", transaction.toJson())
   .also { if (allocation != null) it.put("allocation", allocation.toJson()) }
+
+private fun UpdateAlertParseStatusPayload.toJson() = JSONObject()
+  .put("alertId", alertId)
+  .put("parseStatus", parseStatus)
 
 private fun AssignCategoryPayload.toJson() = JSONObject()
   .put("transactionId", transactionId)

@@ -6,6 +6,7 @@ import android.content.Intent
 import android.os.Handler
 import android.os.Looper
 import android.provider.Telephony
+import android.telephony.SubscriptionManager
 import android.util.Log
 import com.facebook.react.ReactApplication
 import com.facebook.react.modules.core.DeviceEventManagerModule
@@ -15,6 +16,9 @@ import com.lym.spend.db.NewAlertPayload
 import com.lym.spend.db.NewTransactionPayload
 import com.lym.spend.db.SpendCoordinator
 import com.lym.spend.db.TransactionDirection
+import com.lym.spend.db.UpdateAlertParseStatusPayload
+import com.lym.spend.widget.SpendWidgetProvider
+import com.lym.spend.widget.SpendWidgetStorage
 import java.nio.charset.StandardCharsets
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -37,13 +41,29 @@ class SpendSmsTransactionReceiver : BroadcastReceiver() {
     val sender = messages.firstOrNull()?.originatingAddress
     val body = messages.joinToString(separator = "") { it.messageBody.orEmpty() }
     val timestamp = messages.firstOrNull()?.timestampMillis ?: System.currentTimeMillis()
-    val parsed = SpendSmsAutoParser.parse(sender, body, timestamp) ?: return
+    val subscriptionId = intent.getIntExtra(SubscriptionManager.EXTRA_SUBSCRIPTION_INDEX, -1)
+    val providerMessageId = providerMessageId(sender, body, timestamp)
     val pendingResult = goAsync()
     ingestionExecutor.execute {
       try {
-        SpendCoordinator.getInstance(context).execute(
-          createCommand(sender, body, timestamp, parsed),
-        )
+        val coordinator = SpendCoordinator.getInstance(context.applicationContext)
+        val alert = createAlert(sender, body, timestamp, providerMessageId, subscriptionId)
+        // This is intentionally committed before parsing so no SMS is lost when
+        // native rules abstain or are improved in a future release.
+        coordinator.execute(Command.RecordSourceAlert("sms-record:${alert.id}", alert))
+        val parsed = SpendSmsAutoParser.parse(sender, body, timestamp)
+        if (parsed.transaction != null) {
+          coordinator.execute(createCommand(alert, timestamp, parsed.transaction))
+          SpendWidgetStorage.refreshFromDatabase(context.applicationContext, coordinator)
+          SpendWidgetProvider.refreshAllWidgets(context.applicationContext)
+        } else {
+          coordinator.execute(
+            Command.UpdateAlertParseStatus(
+              commandId = "sms-status:${alert.id}:${parsed.parseStatus}",
+              payload = UpdateAlertParseStatusPayload(alert.id, parsed.parseStatus),
+            ),
+          )
+        }
         // Keep the live-React refresh signal, but native persistence above is
         // authoritative and succeeds even when there is no React context.
         mainHandler.post { emitReactEventIfPossible(context) }
@@ -56,24 +76,15 @@ class SpendSmsTransactionReceiver : BroadcastReceiver() {
   }
 
   private fun createCommand(
-    sender: String?,
-    body: String,
+    alert: NewAlertPayload,
     timestamp: Long,
     parsed: ParsedIncomingSmsTransaction,
   ): Command.CreateTransactionFromAlert {
-    val fingerprint = stableUuid("${sender.orEmpty()}\u0000$body\u0000$timestamp")
-    val transactionId = stableUuid("sms-transaction:$fingerprint").toString()
-    val alertId = stableUuid("sms-alert:$fingerprint").toString()
+    val transactionId = stableUuid("sms-transaction:${alert.id}").toString()
     return Command.CreateTransactionFromAlert(
-      commandId = stableUuid("sms-command:$fingerprint").toString(),
+      commandId = "sms-transaction:${alert.id}",
       payload = CreateTransactionFromAlertPayload(
-        alert = NewAlertPayload(
-          id = alertId,
-          rawSender = sender,
-          rawBody = body,
-          receivedAt = timestamp,
-          providerMessageId = "sms:$fingerprint",
-        ),
+        alert = alert.copy(parseStatus = "parsed"),
         transaction = NewTransactionPayload(
           id = transactionId,
           occurredAt = parsed.occurredAtMillis,
@@ -81,11 +92,31 @@ class SpendSmsTransactionReceiver : BroadcastReceiver() {
           accountingMonthKey = requireNotNull(monthFormat.get()).format(Date(parsed.occurredAtMillis)),
           amountMinor = parsed.amountMinor.toLong(),
           direction = TransactionDirection.DEBIT,
-          counterpartyKey = sender?.trim()?.lowercase(Locale.ROOT)?.takeIf(String::isNotEmpty),
+          counterpartyKey = alert.rawSender?.trim()?.lowercase(Locale.ROOT)?.takeIf(String::isNotEmpty),
           channel = "sms",
         ),
       ),
     )
+  }
+
+  private fun createAlert(
+    sender: String?, body: String, timestamp: Long, providerMessageId: String, subscriptionId: Int,
+  ): NewAlertPayload {
+    val alertId = stableUuid("sms-alert:$providerMessageId:$subscriptionId").toString()
+    return NewAlertPayload(
+      id = alertId,
+      rawSender = sender,
+      rawBody = body,
+      receivedAt = timestamp,
+      providerMessageId = providerMessageId,
+      subscriptionId = subscriptionId,
+      parseStatus = "received",
+    )
+  }
+
+  private fun providerMessageId(sender: String?, body: String, timestamp: Long): String {
+    val fingerprint = stableUuid("${sender.orEmpty()}\u0000$body\u0000$timestamp")
+    return "sms:$fingerprint"
   }
 
   private fun stableUuid(value: String): UUID =

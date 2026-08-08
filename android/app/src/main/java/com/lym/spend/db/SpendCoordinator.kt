@@ -43,6 +43,8 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
 
   private fun dispatch(database: SQLiteDatabase, command: Command): CommandResult = when (command) {
     is Command.CreateTransactionFromAlert -> createTransactionFromAlert(database, command)
+    is Command.RecordSourceAlert -> recordSourceAlert(database, command)
+    is Command.UpdateAlertParseStatus -> updateAlertParseStatus(database, command)
     is Command.AssignCategory -> assignCategory(database, command)
     is Command.AcceptSuggestion -> acceptSuggestion(database, command)
     is Command.SetBudgetAmount -> setBudgetAmount(database, command)
@@ -103,7 +105,14 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
       now,
     )
 
-    database.execSQL(
+    val updatedAlert = executeUpdateDelete(
+      database,
+      """UPDATE source_alerts
+         SET transaction_id = ?, parse_status = ?, revision = revision + 1, updated_at = ?
+         WHERE id = ? AND transaction_id IS NULL""",
+      arrayOf(transaction.id, alert.parseStatus, now, alert.id),
+    )
+    if (updatedAlert == 0) database.execSQL(
       """INSERT INTO source_alerts (
            id, transaction_id, raw_sender, raw_body, received_at,
            provider_message_id, subscription_id, bank_reference, parse_status,
@@ -129,6 +138,45 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
       rememberCategory(database, transaction.id, transaction.counterpartyKey, allocation.categoryId, now)
     }
     return applied(command, transaction.id, 1)
+  }
+
+  private fun recordSourceAlert(
+    database: SQLiteDatabase,
+    command: Command.RecordSourceAlert,
+  ): CommandResult {
+    val alert = command.payload
+    val now = System.currentTimeMillis()
+    val inserted = executeUpdateDelete(
+      database,
+      """INSERT OR IGNORE INTO source_alerts (
+           id, transaction_id, raw_sender, raw_body, received_at,
+           provider_message_id, subscription_id, bank_reference, parse_status,
+           created_at, revision, updated_at
+         ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)""",
+      arrayOf(
+        alert.id, alert.rawSender, alert.rawBody, alert.receivedAt,
+        alert.providerMessageId, alert.subscriptionId, alert.bankReference, alert.parseStatus,
+        now, now,
+      ),
+    )
+    return if (inserted == 1) applied(command, alert.id, 1)
+    else noop(command, alert.id, 1, "duplicate_provider_alert")
+  }
+
+  private fun updateAlertParseStatus(
+    database: SQLiteDatabase,
+    command: Command.UpdateAlertParseStatus,
+  ): CommandResult {
+    val payload = command.payload
+    val changed = executeUpdateDelete(
+      database,
+      """UPDATE source_alerts
+         SET parse_status = ?, revision = revision + 1, updated_at = ?
+         WHERE id = ?""",
+      arrayOf(payload.parseStatus, System.currentTimeMillis(), payload.alertId),
+    )
+    return if (changed == 1) applied(command, payload.alertId, 1)
+    else noop(command, payload.alertId, 0, "alert_not_found")
   }
 
   private fun assignCategory(
@@ -593,6 +641,8 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
 
   private fun outboxTarget(command: Command): Pair<String, String> = when (command) {
     is Command.CreateTransactionFromAlert -> "transactions" to command.payload.transaction.id
+    is Command.RecordSourceAlert -> "source_alerts" to command.payload.id
+    is Command.UpdateAlertParseStatus -> "source_alerts" to command.payload.alertId
     is Command.AssignCategory -> "transactions" to command.payload.transactionId
     is Command.AcceptSuggestion -> "transactions" to command.payload.transactionId
     is Command.IgnoreTransaction -> "transactions" to command.payload.transactionId
