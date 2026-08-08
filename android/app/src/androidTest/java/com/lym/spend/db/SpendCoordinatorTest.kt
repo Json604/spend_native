@@ -5,6 +5,7 @@ import android.content.ContextWrapper
 import android.database.sqlite.SQLiteDatabase
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.lym.spend.classify.ClassifierThresholds
 import com.lym.spend.sms.SmsIngestInput
 import com.lym.spend.sms.SpendSmsIngestor
 import java.io.File
@@ -174,6 +175,147 @@ class SpendCoordinatorTest {
     assertEquals(manualCategoryId, allocation["category_id"])
     assertEquals("manual", allocation["source"])
     assertEquals(10_000L, allocation["amount_minor"])
+  }
+
+  @Test
+  fun aSingleMemoryObservationDoesNotAutoApply() = withFreshDatabase { coordinator ->
+    val categoryId = createCategory(coordinator, "Personal")
+    val first = createTransaction(coordinator, counterpartyKey = "merchant:single")
+    assignManual(coordinator, first, categoryId)
+
+    val second = createTransaction(coordinator, counterpartyKey = "merchant:single")
+    val state = coordinator.query(
+      """SELECT a.category_id, a.source,
+           (SELECT count(*) FROM suggestions WHERE transaction_id = ?) suggestions
+         FROM transaction_allocations a WHERE a.transaction_id = ?""",
+      arrayOf(second, second),
+    ).single()
+    assertEquals(null, state["category_id"])
+    assertEquals("rule", state["source"])
+    assertEquals(1L, state["suggestions"])
+  }
+
+  @Test
+  fun repeatedConsistentMemoryObservationsAutoApply() = withFreshDatabase { coordinator ->
+    val categoryId = createCategory(coordinator, "Personal")
+    repeat(30) {
+      val transactionId = createTransaction(coordinator, counterpartyKey = "merchant:repeat")
+      assignManual(coordinator, transactionId, categoryId)
+    }
+
+    val transactionId = createTransaction(coordinator, counterpartyKey = "merchant:repeat")
+    val allocation = coordinator.query(
+      "SELECT category_id, source, confidence FROM transaction_allocations WHERE transaction_id = ?",
+      arrayOf(transactionId),
+    ).single()
+    assertEquals(categoryId, allocation["category_id"])
+    assertEquals("learned", allocation["source"])
+    assertTrue((allocation["confidence"] as Double) >= ClassifierThresholds.MEMORY_AUTO_APPLY_CONFIDENCE)
+  }
+
+  @Test
+  fun conflictingMemoryAbstainsAndRecordsTopTwoSuggestions() = withFreshDatabase { coordinator ->
+    val firstCategory = createCategory(coordinator, "Personal")
+    val secondCategory = createCategory(coordinator, "Travel")
+    repeat(4) {
+      val transactionId = createTransaction(coordinator, counterpartyKey = "merchant:conflict")
+      assignManual(coordinator, transactionId, firstCategory)
+    }
+    repeat(3) {
+      val transactionId = createTransaction(coordinator, counterpartyKey = "merchant:conflict")
+      assignManual(coordinator, transactionId, secondCategory)
+    }
+
+    val transactionId = createTransaction(coordinator, counterpartyKey = "merchant:conflict")
+    val state = coordinator.query(
+      """SELECT a.category_id, a.source,
+           (SELECT count(*) FROM suggestions WHERE transaction_id = ?) suggestions
+         FROM transaction_allocations a WHERE a.transaction_id = ?""",
+      arrayOf(transactionId, transactionId),
+    ).single()
+    assertEquals(null, state["category_id"])
+    assertEquals("rule", state["source"])
+    assertEquals(2L, state["suggestions"])
+  }
+
+  @Test
+  fun manualAssignmentWritesMemoryWithTheAllocationTransaction() = withFreshDatabase { coordinator ->
+    val categoryId = createCategory(coordinator, "Personal")
+    val transactionId = createTransaction(coordinator, counterpartyKey = "merchant:atomic-memory")
+    assignManual(coordinator, transactionId, categoryId)
+
+    val state = coordinator.query(
+      """SELECT a.source, m.category_id, m.observation_count
+         FROM transaction_allocations a
+         LEFT JOIN category_memory m ON m.counterparty_key = 'merchant:atomic-memory'
+         WHERE a.transaction_id = ?""",
+      arrayOf(transactionId),
+    ).single()
+    assertEquals("manual", state["source"])
+    assertEquals(categoryId, state["category_id"])
+    assertEquals(1L, state["observation_count"])
+  }
+
+  @Test
+  fun pspAggregatorKeyIsNeverLearned() = withFreshDatabase { coordinator ->
+    val categoryId = createCategory(coordinator, "Personal")
+    val transactionId = createTransaction(coordinator, counterpartyKey = "vpa:paytm@okaxis")
+    assignManual(coordinator, transactionId, categoryId)
+
+    assertEquals(0L, coordinator.query("SELECT count(*) AS count FROM category_memory").single()["count"])
+  }
+
+  @Test
+  fun provisionalMemoryCannotAutoApply() = withFreshDatabase { coordinator ->
+    val categoryId = createCategory(coordinator, "Personal")
+    val first = createTransaction(coordinator, counterpartyKey = "merchant:provisional")
+    assignManual(coordinator, first, categoryId)
+    writableDatabase(coordinator).execSQL("UPDATE category_memory SET provisional = 1")
+
+    val second = createTransaction(coordinator, counterpartyKey = "merchant:provisional")
+    val state = coordinator.query(
+      """SELECT a.category_id,
+           (SELECT count(*) FROM suggestions WHERE transaction_id = ?) suggestions
+         FROM transaction_allocations a WHERE a.transaction_id = ?""",
+      arrayOf(second, second),
+    ).single()
+    assertEquals(null, state["category_id"])
+    assertEquals(1L, state["suggestions"])
+  }
+
+  @Test
+  fun similarityDoesNotAutoApplyBelowMinimumSupport() = withFreshDatabase { coordinator ->
+    val categoryId = createCategory(coordinator, "Travel")
+    repeat(2) { index ->
+      val transactionId = createTransaction(
+        coordinator,
+        counterpartyKey = "merchant:history-$index",
+        merchantRaw = "Cafe Central",
+      )
+      assignManual(coordinator, transactionId, categoryId)
+    }
+
+    val transactionId = createTransaction(
+      coordinator,
+      counterpartyKey = "merchant:new-cafe",
+      merchantRaw = "Cafe Central",
+    )
+    val state = coordinator.query(
+      """SELECT a.category_id,
+           (SELECT count(*) FROM suggestions WHERE transaction_id = ?) suggestions,
+           (SELECT tier FROM suggestions WHERE transaction_id = ? LIMIT 1) suggestion_tier,
+           (SELECT confidence FROM suggestions WHERE transaction_id = ? LIMIT 1) suggestion_confidence
+         FROM transaction_allocations a WHERE a.transaction_id = ?""",
+      arrayOf(transactionId, transactionId, transactionId, transactionId),
+    ).single()
+
+    // Similarity abstains below its minimum support. The one suggestion is the
+    // cascade's zero-confidence fallback, which keeps the transaction visible
+    // for review rather than silently dropping it; it is not an auto-apply.
+    assertEquals(null, state["category_id"])
+    assertEquals(1L, state["suggestions"])
+    assertEquals("memory", state["suggestion_tier"])
+    assertEquals(0.0, state["suggestion_confidence"])
   }
 
   @Test
@@ -386,7 +528,12 @@ class SpendCoordinatorTest {
     return categoryId
   }
 
-  private fun createTransaction(coordinator: SpendCoordinator): String {
+  private fun createTransaction(
+    coordinator: SpendCoordinator,
+    counterpartyKey: String? = "merchant:test",
+    merchantRaw: String? = null,
+    amountMinor: Long = 10_000,
+  ): String {
     val transactionId = UUID.randomUUID().toString()
     coordinator.execute(
       Command.CreateTransactionFromAlert(
@@ -401,14 +548,34 @@ class SpendCoordinatorTest {
             occurredAt = 1_775_579_200_000L,
             receivedAt = 1_775_579_200_000L,
             accountingMonthKey = "2026-04",
-            amountMinor = 10_000,
+            amountMinor = amountMinor,
             direction = TransactionDirection.DEBIT,
-            counterpartyKey = "merchant:test",
+            merchantRaw = merchantRaw,
+            counterpartyKey = counterpartyKey,
           ),
         ),
       ),
     )
     return transactionId
+  }
+
+  private fun assignManual(coordinator: SpendCoordinator, transactionId: String, categoryId: String) {
+    coordinator.execute(
+      Command.AssignCategory(
+        UUID.randomUUID().toString(),
+        expectedRevision = 1,
+        payload = AssignCategoryPayload(transactionId, categoryId, AllocationSource.MANUAL),
+      ),
+    )
+  }
+
+  private fun writableDatabase(coordinator: SpendCoordinator): SQLiteDatabase {
+    val spendDatabase = SpendCoordinator::class.java.getDeclaredField("spendDatabase").apply {
+      isAccessible = true
+    }.get(coordinator)
+    return SpendDatabase::class.java.getDeclaredField("database").apply {
+      isAccessible = true
+    }.get(spendDatabase) as SQLiteDatabase
   }
 
   private fun newSpendDatabase(context: Context): SpendDatabase = try {

@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.provider.Telephony
 import androidx.core.content.ContextCompat
+import com.lym.spend.notification.SpendNotificationManager
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
@@ -25,6 +26,17 @@ class SpendSmsModule(reactContext: ReactApplicationContext) :
     }
 
     promise.resolve(payload)
+  }
+
+  @ReactMethod
+  fun getNotificationReviewCount(promise: Promise) {
+    promise.resolve(SpendNotificationManager.notificationReviewCount(reactApplicationContext))
+  }
+
+  @ReactMethod
+  fun clearNotificationReviewCount(promise: Promise) {
+    SpendNotificationManager.clearNotificationReviewCount(reactApplicationContext)
+    promise.resolve(null)
   }
 
   @ReactMethod

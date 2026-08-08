@@ -21,8 +21,16 @@ def syncDatabaseMigrations = tasks.register("syncDatabaseMigrations", Sync) {
     into(layout.projectDirectory.dir("src/main/assets/migrations"))
 }
 
+// src/parser/rules/default.json is the classifier source of truth for TS and
+// Android. The packaged copy is generated, never hand-maintained.
+def syncClassifierRulePack = tasks.register("syncClassifierRulePack", Sync) {
+    from(rootProject.file("../src/parser/rules/default.json"))
+    into(layout.projectDirectory.dir("src/main/assets/rules"))
+    rename { "default.json" }
+}
+
 tasks.named("preBuild").configure {
-    dependsOn(syncDatabaseMigrations)
+    dependsOn(syncDatabaseMigrations, syncClassifierRulePack)
 }
 
 def enableProguardInReleaseBuilds = (findProperty('android.enableProguardInReleaseBuilds') ?: false).toBoolean()

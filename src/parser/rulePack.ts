@@ -32,10 +32,27 @@ export type ClassifierRule = {
   group: string;
 };
 
+export type CategoryRule = {
+  categoryLabel: string;
+  confidence: number;
+  merchantTokens?: string[];
+  vpaDomains?: string[];
+  channels?: string[];
+};
+
+export type CounterpartyRuleConfig = {
+  aggregatorPatterns: string[];
+  aggregatorDomains: string[];
+  genericBankVpaDomains: string[];
+  genericLocalPartPattern: string;
+};
+
 /** Serializable shape accepted from bundled JSON, a database row, or a cache. */
 export type RulePack = {
+  categoryRules: CategoryRule[];
   classifierOrder: ClassifierRule[];
   classifiers: Record<string, string[]>;
+  counterparty: CounterpartyRuleConfig;
   monetaryRoleOrder: RulePackMonetaryRole[];
   monetaryRoles: Partial<Record<RulePackMonetaryRole, string[]>>;
   version: number;

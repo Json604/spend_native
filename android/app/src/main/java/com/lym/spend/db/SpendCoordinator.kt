@@ -4,8 +4,14 @@ import android.content.Context
 import android.database.Cursor
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteStatement
+import com.lym.spend.classify.ClassifierCascade
+import com.lym.spend.classify.ClassifierTransactionInput
+import com.lym.spend.classify.ClassificationCandidate
+import com.lym.spend.classify.ClassificationTier
 
 class SpendCoordinator private constructor(private val spendDatabase: SpendDatabase) {
+  private val classifierCascade = ClassifierCascade(spendDatabase.applicationContext)
+
   /** Executes one complete command transaction on the process-wide writer. */
   fun execute(command: Command): CommandResult = spendDatabase.writeTransaction { database ->
     processedResult(database, command.commandId)?.let { return@writeTransaction it }
@@ -90,21 +96,6 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
       ),
     )
 
-    val allocation = command.payload.allocation ?: InitialAllocationPayload(
-      categoryId = null,
-      source = AllocationSource.RULE,
-    )
-    insertFullAllocation(
-      database,
-      allocation.id ?: "${transaction.id}:allocation",
-      transaction.id,
-      allocation.categoryId,
-      transaction.amountMinor,
-      allocation.source,
-      allocation.confidence,
-      now,
-    )
-
     val updatedAlert = executeUpdateDelete(
       database,
       """UPDATE source_alerts
@@ -132,6 +123,43 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
         now,
       ),
     )
+
+    val requestedAllocation = command.payload.allocation
+    val cascade = if (requestedAllocation == null && transaction.direction == TransactionDirection.DEBIT) {
+      classifierCascade.classify(
+        database,
+        ClassifierTransactionInput(
+          transactionId = transaction.id,
+          amountMinor = transaction.amountMinor,
+          merchantRaw = transaction.merchantRaw,
+          counterpartyKey = transaction.counterpartyKey,
+          channel = transaction.channel,
+          rawMessage = alert.rawBody,
+        ),
+      )
+    } else null
+    val autoCandidate = cascade?.autoApply
+    val allocation = requestedAllocation ?: autoCandidate?.let { candidate ->
+      InitialAllocationPayload(
+        categoryId = candidate.categoryId,
+        source = candidate.allocationSource(),
+        confidence = candidate.confidence,
+      )
+    } ?: InitialAllocationPayload(categoryId = null, source = AllocationSource.RULE)
+
+    insertFullAllocation(
+      database,
+      allocation.id ?: "${transaction.id}:allocation",
+      transaction.id,
+      allocation.categoryId,
+      transaction.amountMinor,
+      allocation.source,
+      allocation.confidence,
+      now,
+    )
+    cascade?.suggestions?.forEach { suggestion ->
+      insertClassifierSuggestion(database, transaction.id, suggestion, now)
+    }
 
     assertAllocationInvariant(database, transaction.id)
     if (allocation.source == AllocationSource.MANUAL && allocation.categoryId != null) {
@@ -570,7 +598,7 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     categoryId: String,
     now: Long,
   ) {
-    if (counterpartyKey == null) return
+    if (counterpartyKey == null || classifierCascade.isLowSpecificityKey(counterpartyKey)) return
     val revision = scalarInt(
       database,
       "SELECT revision FROM category_memory WHERE counterparty_key = ? AND category_id = ?",
@@ -593,6 +621,30 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
         arrayOf(now, now, counterpartyKey, categoryId, revision),
       )
     }
+  }
+
+  private fun insertClassifierSuggestion(
+    database: SQLiteDatabase,
+    transactionId: String,
+    candidate: ClassificationCandidate,
+    now: Long,
+  ) {
+    database.execSQL(
+      """INSERT INTO suggestions (
+           id, transaction_id, category_id, confidence, tier, catalog_version,
+           transaction_revision, created_at, revision, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, 1, ?)""",
+      arrayOf(
+        "suggestion:$transactionId:${candidate.tier.wireValue}:${candidate.categoryId}",
+        transactionId,
+        candidate.categoryId,
+        candidate.confidence,
+        candidate.tier.wireValue,
+        candidate.catalogVersion,
+        now,
+        now,
+      ),
+    )
   }
 
   private fun monthRevision(database: SQLiteDatabase, monthKey: String): Int =
@@ -750,6 +802,12 @@ private data class SuggestionRow(
 )
 
 private data class PossibleMatchRow(val id: String, val resolved: Boolean, val revision: Int)
+
+private fun ClassificationCandidate.allocationSource(): AllocationSource = when (tier) {
+  ClassificationTier.MEMORY -> AllocationSource.LEARNED
+  ClassificationTier.RULES -> AllocationSource.RULE
+  ClassificationTier.SIMILARITY -> AllocationSource.SIMILARITY
+}
 
 private fun Boolean.asSqlInt(): Int = if (this) 1 else 0
 

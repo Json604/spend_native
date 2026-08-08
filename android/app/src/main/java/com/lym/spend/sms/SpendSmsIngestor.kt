@@ -8,6 +8,7 @@ import com.lym.spend.db.NewTransactionPayload
 import com.lym.spend.db.SpendCoordinator
 import com.lym.spend.db.TransactionDirection
 import com.lym.spend.db.UpdateAlertParseStatusPayload
+import com.lym.spend.notification.SpendNotificationManager
 import com.lym.spend.widget.SpendWidgetProvider
 import com.lym.spend.widget.SpendWidgetStorage
 import java.nio.charset.StandardCharsets
@@ -45,6 +46,13 @@ object SpendSmsIngestor {
     val parsed = SpendSmsAutoParser.parse(input.sender, input.body, input.timestamp)
     if (parsed.transaction != null) {
       coordinator.execute(createTransactionCommand(alert, input.timestamp, parsed.transaction))
+      // Publish only after the coordinator transaction commits. This keeps the
+      // common action path safe when the app process is not running later.
+      SpendNotificationManager.publishForTransaction(
+        context.applicationContext,
+        coordinator,
+        stableUuid("sms-transaction:${alert.id}").toString(),
+      )
       SpendWidgetStorage.refreshFromDatabase(context.applicationContext, coordinator)
       SpendWidgetProvider.refreshAllWidgets(context.applicationContext)
     } else {
@@ -76,8 +84,9 @@ object SpendSmsIngestor {
           accountingMonthKey = monthFormat.get().format(Date(parsed.occurredAtMillis)),
           amountMinor = parsed.amountMinor,
           direction = TransactionDirection.DEBIT,
-          counterpartyKey = alert.rawSender?.trim()?.lowercase(Locale.ROOT)?.takeIf(String::isNotEmpty),
-          channel = "sms",
+          merchantRaw = parsed.merchantRaw,
+          counterpartyKey = parsed.counterpartyKey,
+          channel = parsed.channel,
         ),
       ),
     )

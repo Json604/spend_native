@@ -5,6 +5,9 @@ data class ParsedIncomingSmsTransaction(
   val amountMinor: Long,
   val categoryLabel: String?,
   val occurredAtMillis: Long,
+  val merchantRaw: String?,
+  val counterpartyKey: String?,
+  val channel: String,
 )
 
 enum class SmsMessageClassification {
@@ -26,6 +29,12 @@ data class SmsParseResult(
 private data class MonetarySpan(val amountMinor: Long, val role: SmsMonetaryRole)
 
 object SpendSmsAutoParser {
+  private val VPA_PATTERN = Regex("\\b[a-z0-9][a-z0-9._-]{1,50}@[a-z0-9][a-z0-9.-]{1,30}\\b", RegexOption.IGNORE_CASE)
+  private val UPI_PATTERN = Regex("\\bupi\\b|\\bqr\\b", RegexOption.IGNORE_CASE)
+  private val MERCHANT_PATTERN = Regex(
+    """\b(?:at|to)\s+([A-Za-z][A-Za-z0-9 &'./-]{1,60}?)(?=\s+(?:using|via|on|for|upi|ref|from)\b|[.,]|$)""",
+    RegexOption.IGNORE_CASE,
+  )
   private val amountRegex = Regex(
     """(?:₹|(?:rs|inr|mrp|amt|amount)\.?)\s*[:\-]?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)(?:\s*(lakh|lac|crore|k))?""",
     RegexOption.IGNORE_CASE,
@@ -62,7 +71,14 @@ object SpendSmsAutoParser {
     if (classification == SmsMessageClassification.POSTED_DEBIT && transactionSpan != null) {
       return SmsParseResult(
         classification,
-        ParsedIncomingSmsTransaction(transactionSpan.amountMinor, inferCategory(text), timestamp),
+        ParsedIncomingSmsTransaction(
+          amountMinor = transactionSpan.amountMinor,
+          categoryLabel = null,
+          occurredAtMillis = timestamp,
+          merchantRaw = extractMerchant(text),
+          counterpartyKey = extractCounterpartyKey(text),
+          channel = if (VPA_PATTERN.containsMatchIn(text) || UPI_PATTERN.containsMatchIn(text)) "upi" else "sms",
+        ),
         "parsed",
       )
     }
@@ -99,10 +115,21 @@ object SpendSmsAutoParser {
     return try { value.movePointRight(2).multiply(multiplier.toBigDecimal()).longValueExact() } catch (_: ArithmeticException) { 0 }
   }
 
-  private fun inferCategory(text: String): String? = when {
-    Regex("""swiggy|instamart""", RegexOption.IGNORE_CASE).containsMatchIn(text) -> "Swiggy"
-    Regex("""zomato|blinkit""", RegexOption.IGNORE_CASE).containsMatchIn(text) -> "Zomato"
-    Regex("""zepto""", RegexOption.IGNORE_CASE).containsMatchIn(text) -> "Zepto"
-    else -> null
+  private fun extractCounterpartyKey(text: String): String? {
+    val vpa = VPA_PATTERN.find(text)?.value?.lowercase()?.takeIf(String::isNotBlank)
+    if (vpa != null) return "vpa:$vpa"
+    return extractMerchant(text)?.let { "merchant:${normalize(it)}" }
   }
+
+  private fun extractMerchant(text: String): String? {
+    val match = MERCHANT_PATTERN.find(text) ?: return null
+    return match.groupValues[1].trim().takeIf { it.isNotBlank() }
+  }
+
+  private fun normalize(value: String): String = value
+    .lowercase()
+    .replace(Regex("[^a-z0-9&.'/-]+"), " ")
+    .replace(Regex("\\s+"), " ")
+    .trim()
+
 }

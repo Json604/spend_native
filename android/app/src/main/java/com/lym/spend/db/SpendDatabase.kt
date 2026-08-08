@@ -13,11 +13,12 @@ import kotlin.concurrent.withLock
  * relative or library-default path would create a different database file.
  */
 class SpendDatabase private constructor(context: Context) {
+  internal val applicationContext: Context = context.applicationContext
   private val writerLock = ReentrantLock(true)
   private val database: SQLiteDatabase
 
   init {
-    val appContext = context.applicationContext
+    val appContext = applicationContext
     val databasePath = appContext.getDatabasePath(DATABASE_NAME)
     check(databasePath.parentFile?.let { it.exists() || it.mkdirs() } == true) {
       "Could not create database directory for ${databasePath.absolutePath}"
