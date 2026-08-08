@@ -162,7 +162,7 @@ class SpendSmsModule(reactContext: ReactApplicationContext) :
     }
   }
 
-  // No-op in spend-expo: there's no native pending-refresh storage. The
+  // Deliberately a no-op: there is no native pending-refresh storage. The
   // BroadcastReceiver emits a JS event directly and SpendProvider refreshes
   // from that signal plus AppState.
   @ReactMethod
@@ -170,7 +170,7 @@ class SpendSmsModule(reactContext: ReactApplicationContext) :
     promise.resolve(false)
   }
 
-  // No-ops in spend-expo: ignore-tracking lives in the JS repository
+  // Deliberately no-ops: ignore-tracking lives in the JS repository
   // (externalFingerprint dedupe) rather than native SharedPreferences.
   @ReactMethod
   fun markIgnored(

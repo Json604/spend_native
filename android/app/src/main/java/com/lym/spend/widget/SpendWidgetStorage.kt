@@ -10,7 +10,7 @@ import java.util.Locale
 /**
  * Local SharedPreferences cache for widget data. Source of truth is the JS app,
  * which pushes snapshots in via [SpendWidgetBridgeModule] whenever its state
- * changes. The widget reads from here and never hits Supabase directly.
+ * changes. The widget reads from here and never touches the network.
  */
 object SpendWidgetStorage {
     private const val PREFS = "spend_widget_cache"

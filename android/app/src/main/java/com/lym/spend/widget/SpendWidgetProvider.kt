@@ -73,7 +73,7 @@ class SpendWidgetProvider : AppWidgetProvider() {
             views.setOnClickPendingIntent(R.id.widget_refresh, refreshPending)
 
             if (!isCompact) {
-                // + button → also launch app (no deep link wired in spend-expo yet)
+                // + button → also launch app (no deep link wired for it yet)
                 views.setOnClickPendingIntent(R.id.widget_add, launchPending)
 
                 // Categories ListView remote adapter
