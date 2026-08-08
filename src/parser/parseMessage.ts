@@ -1,5 +1,6 @@
 import {
   classifyMessageDetailed,
+  isNonSpendClassification,
   type LearnedRuleProvider,
   type MessageClassification,
 } from './messageClassifier.ts';
@@ -151,7 +152,9 @@ export function parseMessage(
         ? 'unknown_classification'
         : isPosted
           ? 'missing_transaction_amount'
-          : 'non_transaction_classification',
+          : isNonSpendClassification(classification)
+            ? 'non_transaction_classification'
+            : 'unknown_classification',
     transaction: null,
   };
 }

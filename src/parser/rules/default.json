@@ -25,6 +25,7 @@
   },
   "classifierOrder": [
     {"classification": "security", "group": "security"},
+    {"classification": "payment_request", "group": "payment_request"},
     {"classification": "marketing", "group": "strong_marketing"},
     {"classification": "reversal", "group": "failure"},
     {"classification": "mandate_setup", "group": "mandate_setup"},
@@ -41,6 +42,23 @@
       "\\blog[ -]?in\\b",
       "\\bpassword\\b",
       "\\bkyc\\b"
+    ],
+    "payment_request": [
+      "\\binitiate\\s+(?:the\\s+)?payment(?:\\s+process)?\\b",
+      "\\bcomplete\\s+(?:(?:your|the)\\s+)?payment\\b",
+      "\\bplease\\s+pay\\b",
+      "\\bpay\\s+now\\b",
+      "\\bpayment\\s+link\\b",
+      "\\bclick\\s+on\\s+the\\s+outlined\\b",
+      "\\bclick\\s+(?:on\\s+)?(?:the\\s+)?link\\b",
+      "\\bclick\\s+here\\b",
+      "\\bpayment\\s+pending\\b",
+      "\\bdue\\s+for\\s+payment\\b",
+      "\\brequesting\\s+payment\\b",
+      "\\bcollect\\s+request\\b",
+      "\\border\\s+is\\s+confirmed\\b",
+      "\\bpurchased\\s+item\\b",
+      "\\b(?:https?://)?(?:bit\\.ly|tinyurl\\.com|t\\.co|goo\\.gl|ow\\.ly|is\\.gd|cutt\\.ly)/[a-z0-9_-]+\\b"
     ],
     "strong_marketing": [
       "\\bpre[ -]?approved\\b",
@@ -77,9 +95,8 @@
       "\\bauto[ -]?pay\\s+(?:is\\s+)?(?:set|setup|activated|registered|enabled)\\b",
       "\\bwill be debited on\\b",
       "\\bwill be debited\\b",
-      "\\bscheduled\\b",
-      "\\bcollect request\\b",
-      "\\brequesting payment\\b"
+      "\\b(?:will|shall|to)\\s+be\\s+(?:debited|sent|spent|paid|withdrawn|charged)\\b",
+      "\\bscheduled\\b"
     ],
     "pending": [
       "\\bpending\\b",
@@ -103,7 +120,7 @@
       "\\bpaid\\b",
       "\\bwithdrawn\\b",
       "\\bcharged\\b",
-      "\\bpurchased?\\b",
+      "\\b(?:payment|transaction|txn)\\b[\\s\\S]{0,120}\\b(?:is|was|has\\s+been)?\\s*successful\\b",
       "\\brecharge\\s+of\\s+(?:rs\\.?|inr|₹)\\s*\\d[\\s\\S]{0,40}\\bis successful\\b"
     ],
     "balance": [

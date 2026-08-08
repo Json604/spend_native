@@ -6,6 +6,7 @@ export const MESSAGE_CLASSIFICATIONS = [
   'pending',
   'reversal',
   'mandate_setup',
+  'payment_request',
   'balance_only',
   'marketing',
   'security',

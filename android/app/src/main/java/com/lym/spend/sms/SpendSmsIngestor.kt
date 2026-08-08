@@ -43,7 +43,7 @@ object SpendSmsIngestor {
     // Commit the raw alert before parsing so abstained messages are retained for
     // later reprocessing and parser improvements.
     coordinator.execute(Command.RecordSourceAlert("sms-record:${alert.id}", alert))
-    val parsed = SpendSmsAutoParser.parse(input.sender, input.body, input.timestamp)
+    val parsed = SpendSmsAutoParser.parse(context, input.sender, input.body, input.timestamp)
     if (parsed.transaction != null) {
       coordinator.execute(createTransactionCommand(alert, input.timestamp, parsed.transaction))
       // Publish only after the coordinator transaction commits. This keeps the

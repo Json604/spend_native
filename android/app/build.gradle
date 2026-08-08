@@ -58,6 +58,19 @@ android {
             keyAlias 'androiddebugkey'
             keyPassword 'android'
         }
+        // Release credentials come from gradle.properties in the user's home
+        // (~/.gradle/gradle.properties), never from this repo. Losing this key
+        // means never being able to update the app for anyone who installed it,
+        // because Android identifies an app by its signing certificate.
+        release {
+            def storePath = project.findProperty('SPEND_RELEASE_STORE_FILE')
+            if (storePath && file(storePath).exists()) {
+                storeFile file(storePath)
+                storePassword project.findProperty('SPEND_RELEASE_STORE_PASSWORD')
+                keyAlias project.findProperty('SPEND_RELEASE_KEY_ALIAS')
+                keyPassword project.findProperty('SPEND_RELEASE_KEY_PASSWORD')
+            }
+        }
     }
 
     buildTypes {
@@ -65,7 +78,12 @@ android {
             signingConfig signingConfigs.debug
         }
         release {
-            signingConfig signingConfigs.debug
+            // Fall back to debug signing only when release credentials are absent,
+            // so a fresh clone still builds. Any APK given to another person must
+            // be signed with the real release key.
+            signingConfig project.hasProperty('SPEND_RELEASE_STORE_FILE')
+                ? signingConfigs.release
+                : signingConfigs.debug
             shrinkResources (findProperty('android.enableShrinkResourcesInReleaseBuilds')?.toBoolean() ?: false)
             minifyEnabled enableProguardInReleaseBuilds
             proguardFiles getDefaultProguardFile("proguard-android.txt"), "proguard-rules.pro"

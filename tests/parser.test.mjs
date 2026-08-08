@@ -96,6 +96,36 @@ test('classification handles non-posted intents before transaction words', () =>
   assert.equal(classifyMessage('Unrecognized informational message'), 'unknown');
 });
 
+test('payment requests and phishing links never become debit transactions', () => {
+  const messages = [
+    'initiate the payment process for your purchased item please click on the outlined payment link Rs.8900',
+    'Your order is confirmed. Please complete payment of Rs.8900 by clicking the link below',
+    'Pay now Rs.4999 to claim your reward. Click bit.ly/xyz',
+    'Payment pending for order #123. Amount due Rs.2500',
+  ];
+
+  for (const message of messages) {
+    const result = parseMessage(message);
+    assert.equal(result.classification, 'payment_request', message);
+    assert.equal(result.createsTransaction, false, message);
+    assert.equal(result.transaction, null, message);
+  }
+});
+
+test('completed debit constructions remain transactions', () => {
+  const messages = [
+    ['Sent Rs.48.00 from XXXXXX1234 to RAHUL SHARMA on 01/06/2026. UPI ref no. 651805890728.', 4_800],
+    ['Payment of Rs.1,200 to SWIGGY is successful. UPI Ref 123456789012.', 120_000],
+    ['Avl Bal Rs.12,345 in A/c X1234 after debit of Rs.500.', 50_000],
+  ];
+
+  for (const [message, amountMinor] of messages) {
+    const result = parseMessage(message);
+    assert.equal(result.classification, 'posted_debit', message);
+    assert.equal(result.transaction?.amountMinor, amountMinor, message);
+  }
+});
+
 test('monetary extraction returns every span with distinct contextual roles', () => {
   const spans = extractMonetarySpans(
     'A/c debited INR 1,600.00. Available balance is INR 67,000.00. Minimum due Rs.500; EMI Rs.250.',
@@ -227,6 +257,7 @@ test('real SMS corpus never creates a transaction from balance or limit money', 
       'pending',
       'reversal',
       'mandate_setup',
+      'payment_request',
       'balance_only',
       'marketing',
       'security',

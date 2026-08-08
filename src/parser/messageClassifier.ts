@@ -8,6 +8,23 @@ import {
 
 export type {MessageClassification} from './rulePack.ts';
 
+/** Classifications that may contain money but can never create a spend. */
+export const NON_SPEND_CLASSIFICATIONS: readonly MessageClassification[] = [
+  'posted_credit',
+  'pending',
+  'reversal',
+  'mandate_setup',
+  'payment_request',
+  'balance_only',
+  'marketing',
+  'security',
+  'unknown',
+];
+
+export const isNonSpendClassification = (
+  classification: MessageClassification,
+): boolean => NON_SPEND_CLASSIFICATIONS.includes(classification);
+
 export type LearnedRuleDecision = {
   classification: MessageClassification;
 };

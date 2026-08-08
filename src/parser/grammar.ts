@@ -119,11 +119,19 @@ function directionForVerb(rawVerb: string, message: string, index: number): Tran
   return /^\s+from\b/i.test(suffix) ? 'credit' : 'debit';
 }
 
+function isNonCompletedVerb(message: string, index: number): boolean {
+  const prefix = message.slice(Math.max(0, index - 24), index);
+  return /\b(?:will|shall|to|please|can|may|might|would|could|should)\s+(?:be\s+)?$/i.test(
+    prefix,
+  );
+}
+
 function extractVerbs(message: string): StructuralVerb[] {
   const verbs: StructuralVerb[] = [];
 
   for (const match of message.matchAll(VERB_PATTERN)) {
     if (typeof match.index !== 'number') continue;
+    if (isNonCompletedVerb(message, match.index)) continue;
     verbs.push({
       direction: directionForVerb(match[1], message, match.index),
       index: match.index,
@@ -132,12 +140,6 @@ function extractVerbs(message: string): StructuralVerb[] {
   }
 
   for (const match of message.matchAll(/\bdebit\s+of\b/gi)) {
-    if (typeof match.index === 'number') {
-      verbs.push({direction: 'debit', index: match.index, raw: match[0]});
-    }
-  }
-
-  for (const match of message.matchAll(/\bpayment\s+of\b/gi)) {
     if (typeof match.index === 'number') {
       verbs.push({direction: 'debit', index: match.index, raw: match[0]});
     }
@@ -248,7 +250,7 @@ function inferGenericClassification(
   if (transactionAmountIndexes.size === 0) return null;
 
   const successfulMovementPattern = new RegExp(
-    `\\b(?:payment|transaction)\\s+(?:of|for)\\s+${CURRENCY_WITHOUT_CAPTURES}[\\s\\S]{0,160}\\b(?:is|was|has\\s+been)?\\s*(?:successful|processed\\s+successfully)\\b`,
+    `\\b(?:payment|transaction|txn)\\s+(?:of|for)\\s+${CURRENCY_WITHOUT_CAPTURES}[\\s\\S]{0,160}\\b(?:is|was|has\\s+been)?\\s*(?:successful|processed\\s+successfully)\\b`,
     'i',
   );
   if (successfulMovementPattern.test(message)) return 'posted_debit';
