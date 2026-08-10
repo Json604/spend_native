@@ -31,6 +31,26 @@ const nativeUpdate = NativeModules.SpendUpdate as NativeUpdate | undefined;
 
 let checkedThisSession = false;
 
+export type UpdateProgress =
+  | {status: "idle"}
+  | {status: "downloading"; versionName: string};
+
+let updateProgress: UpdateProgress = {status: "idle"};
+const progressListeners = new Set<(progress: UpdateProgress) => void>();
+
+function setUpdateProgress(progress: UpdateProgress): void {
+  updateProgress = progress;
+  progressListeners.forEach((listener) => listener(progress));
+}
+
+export function subscribeToUpdateProgress(
+  listener: (progress: UpdateProgress) => void,
+): () => void {
+  progressListeners.add(listener);
+  listener(updateProgress);
+  return () => progressListeners.delete(listener);
+}
+
 function isManifest(value: unknown): value is UpdateManifest {
   if (!value || typeof value !== "object") return false;
   const manifest = value as Record<string, unknown>;
@@ -76,9 +96,12 @@ export async function checkForUpdate(options?: { silent?: boolean }): Promise<vo
   }
 
   const install = () => {
-    nativeUpdate.downloadAndInstall(manifest.url, manifest.sha256).catch((error: unknown) => {
-      Alert.alert("Update failed", error instanceof Error ? error.message : String(error));
-    });
+    setUpdateProgress({status: "downloading", versionName: manifest.versionName});
+    nativeUpdate.downloadAndInstall(manifest.url, manifest.sha256)
+      .catch((error: unknown) => {
+        Alert.alert("Update failed", error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => setUpdateProgress({status: "idle"}));
   };
 
   Alert.alert(
