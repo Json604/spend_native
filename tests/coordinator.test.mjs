@@ -387,6 +387,65 @@ test('allocation sum invariant aborts a command that would over-allocate', async
   );
 });
 
+test('split transaction replaces the full allocation with exact category amounts', async () => {
+  const {coordinator} = freshCoordinator('split-allocation');
+  const groceries = await createCategory(coordinator, 'Groceries');
+  const household = await createCategory(coordinator, 'Household');
+  const {transactionId} = await createTransaction(coordinator, {amountMinor: 10_000});
+
+  await coordinator.execute({
+    commandId: randomUUID(),
+    kind: 'splitTransaction',
+    expectedRevision: 1,
+    payload: {
+      transactionId,
+      allocations: [
+        {categoryId: groceries, amountMinor: 6_500},
+        {categoryId: household, amountMinor: 3_500},
+      ],
+    },
+  });
+
+  const rows = await coordinator.query(
+    `SELECT category_id, amount_minor, source
+       FROM transaction_allocations WHERE transaction_id = ? ORDER BY amount_minor DESC`,
+    [transactionId],
+  );
+  assert.deepEqual(rows.map(row => ({...row})), [
+    {category_id: groceries, amount_minor: 6_500, source: 'manual'},
+    {category_id: household, amount_minor: 3_500, source: 'manual'},
+  ]);
+});
+
+test('an incomplete split rolls back and preserves the original allocation', async () => {
+  const {coordinator} = freshCoordinator('split-rollback');
+  const groceries = await createCategory(coordinator, 'Groceries');
+  const household = await createCategory(coordinator, 'Household');
+  const {transactionId} = await createTransaction(coordinator, {amountMinor: 10_000});
+
+  await assert.rejects(
+    coordinator.execute({
+      commandId: randomUUID(),
+      kind: 'splitTransaction',
+      expectedRevision: 1,
+      payload: {
+        transactionId,
+        allocations: [
+          {categoryId: groceries, amountMinor: 6_000},
+          {categoryId: household, amountMinor: 3_000},
+        ],
+      },
+    }),
+    error => error instanceof AllocationInvariantError,
+  );
+
+  const rows = await coordinator.query(
+    'SELECT category_id, amount_minor FROM transaction_allocations WHERE transaction_id = ?',
+    [transactionId],
+  );
+  assert.deepEqual(rows.map(row => ({...row})), [{category_id: null, amount_minor: 10_000}]);
+});
+
 test('version-1 databases migrate to 2 before serving queries', async () => {
   const dbPath = newDatabasePath('migration-v1');
   const versionOne = new DatabaseSync(dbPath);

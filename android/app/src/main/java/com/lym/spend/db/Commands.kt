@@ -1,5 +1,6 @@
 package com.lym.spend.db
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 /** Marks a pulled op as server-authoritative: no optimistic-concurrency check. */
@@ -90,6 +91,17 @@ data class AssignCategoryPayload(
   val allocationId: String? = null,
 )
 
+data class SplitAllocationPayload(
+  val categoryId: String,
+  val amountMinor: Long,
+  val allocationId: String? = null,
+)
+
+data class SplitTransactionPayload(
+  val transactionId: String,
+  val allocations: List<SplitAllocationPayload>,
+)
+
 data class AcceptSuggestionPayload(
   val transactionId: String,
   val suggestionId: String,
@@ -177,6 +189,14 @@ sealed class Command(open val commandId: String, val kind: String) {
       }
     }
     companion object { const val KIND = "assignCategory" }
+  }
+
+  data class SplitTransaction(
+    override val commandId: String,
+    val expectedRevision: Int,
+    val payload: SplitTransactionPayload,
+  ) : Command(commandId, KIND) {
+    companion object { const val KIND = "splitTransaction" }
   }
 
   data class AcceptSuggestion(
@@ -275,6 +295,7 @@ sealed class Command(open val commandId: String, val kind: String) {
       is RecordSourceAlert -> json.put("payload", payload.toJson())
       is UpdateAlertParseStatus -> json.put("payload", payload.toJson())
       is AssignCategory -> json.put("expectedRevision", expectedRevision).put("payload", payload.toJson())
+      is SplitTransaction -> json.put("expectedRevision", expectedRevision).put("payload", payload.toJson())
       is AcceptSuggestion -> json.put("expectedRevision", expectedRevision).put("payload", payload.toJson())
       is SetBudgetAmount -> json.put("expectedRevision", expectedRevision).put("payload", payload.toJson())
       is ClearMonthBudget -> json.put("expectedRevision", expectedRevision).put("payload", payload.toJson())
@@ -320,6 +341,11 @@ sealed class Command(open val commandId: String, val kind: String) {
           commandId,
           expectedRevision(),
           assignCategoryPayloadFromJson(payload),
+        )
+        SplitTransaction.KIND -> SplitTransaction(
+          commandId,
+          expectedRevision(),
+          splitTransactionPayloadFromJson(payload),
         )
         AcceptSuggestion.KIND -> AcceptSuggestion(
           commandId,
@@ -518,6 +544,22 @@ private fun assignCategoryPayloadFromJson(json: JSONObject) = AssignCategoryPayl
   allocationId = json.optionalString("allocationId"),
 )
 
+private fun splitTransactionPayloadFromJson(json: JSONObject) = SplitTransactionPayload(
+  transactionId = json.getString("transactionId"),
+  allocations = json.getJSONArray("allocations").let { array ->
+    buildList {
+      for (index in 0 until array.length()) {
+        val allocation = array.getJSONObject(index)
+        add(SplitAllocationPayload(
+          categoryId = allocation.getString("categoryId"),
+          amountMinor = allocation.getLong("amountMinor"),
+          allocationId = allocation.optionalString("allocationId"),
+        ))
+      }
+    }
+  },
+)
+
 private fun acceptSuggestionPayloadFromJson(json: JSONObject) = AcceptSuggestionPayload(
   transactionId = json.getString("transactionId"),
   suggestionId = json.getString("suggestionId"),
@@ -622,6 +664,17 @@ private fun AssignCategoryPayload.toJson() = JSONObject()
   .put("source", source.wireValue)
   .putOptional("confidence", confidence)
   .putOptional("allocationId", allocationId)
+
+private fun SplitTransactionPayload.toJson() = JSONObject()
+  .put("transactionId", transactionId)
+  .put("allocations", JSONArray().also { array ->
+    allocations.forEach { allocation ->
+      array.put(JSONObject()
+        .put("categoryId", allocation.categoryId)
+        .put("amountMinor", allocation.amountMinor)
+        .putOptional("allocationId", allocation.allocationId))
+    }
+  })
 
 private fun AcceptSuggestionPayload.toJson() = JSONObject()
   .put("transactionId", transactionId)

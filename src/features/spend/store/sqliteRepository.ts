@@ -414,6 +414,25 @@ export class SqliteSpendRepository implements SpendDataRepository {
     }, () => this.transactionRevision(transactionId));
   }
 
+  async splitTransaction(
+    transactionId: string,
+    allocations: Array<{categoryId: SpendCategoryId; amountMinor: number}>,
+  ): Promise<void> {
+    const revision = await this.transactionRevision(transactionId);
+    await this.executeWithConflict({
+      commandId: uuid(),
+      kind: "splitTransaction",
+      expectedRevision: revision,
+      payload: {
+        transactionId,
+        allocations: allocations.map((allocation, index) => ({
+          ...allocation,
+          allocationId: `${transactionId}:split:${index}`,
+        })),
+      },
+    }, () => this.transactionRevision(transactionId));
+  }
+
   async ignoreTransaction(transactionId: string): Promise<void> {
     const revision = await this.transactionRevision(transactionId);
     await this.executeWithConflict({ commandId: uuid(), kind: "ignoreTransaction", expectedRevision: revision, payload: { transactionId } }, () => this.transactionRevision(transactionId));

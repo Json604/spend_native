@@ -8,6 +8,7 @@ import type {
   AllocationSource,
   ArchiveCategoryCommand,
   AssignCategoryCommand,
+  SplitTransactionCommand,
   ClearMonthBudgetCommand,
   Command,
   CommandKind,
@@ -358,6 +359,8 @@ class NodeDatabaseCoordinator implements DatabaseCoordinator {
         return this.#createTransactionFromAlert(command);
       case "assignCategory":
         return this.#assignCategory(command);
+      case "splitTransaction":
+        return this.#splitTransaction(command);
       case "acceptSuggestion":
         return this.#acceptSuggestion(command);
       case "setBudgetAmount":
@@ -575,6 +578,35 @@ class NodeDatabaseCoordinator implements DatabaseCoordinator {
       now,
     );
 
+    return applied(command, transaction.id, transaction.revision + 1);
+  }
+
+  #splitTransaction(command: SplitTransactionCommand): CommandResult {
+    const transaction = this.#transaction(command.payload.transactionId);
+    assertExpectedRevision(transaction.id, command.expectedRevision, transaction.revision);
+    const allocations = command.payload.allocations;
+    if (allocations.length < 2) throw new Error("A split requires at least two categories");
+    if (new Set(allocations.map((allocation) => allocation.categoryId)).size !== allocations.length) {
+      throw new Error("Split categories must be unique");
+    }
+    if (allocations.some((allocation) => !Number.isInteger(allocation.amountMinor) || allocation.amountMinor <= 0)) {
+      throw new Error("Split amounts must be positive whole minor units");
+    }
+    const now = Date.now();
+    this.#run("DELETE FROM transaction_allocations WHERE transaction_id = ?", [transaction.id]);
+    allocations.forEach((allocation, index) => {
+      this.#insertFullAllocation(
+        allocation.allocationId ?? `${transaction.id}:split:${index}`,
+        transaction.id,
+        allocation.categoryId,
+        allocation.amountMinor,
+        "manual",
+        null,
+        now,
+      );
+    });
+    this.#assertAllocationInvariant(transaction.id);
+    this.#bumpTransaction(transaction.id, transaction.revision, now);
     return applied(command, transaction.id, transaction.revision + 1);
   }
 
@@ -988,6 +1020,7 @@ class NodeDatabaseCoordinator implements DatabaseCoordinator {
       case "createTransactionFromAlert":
         return { table: "transactions", id: command.payload.transaction.id };
       case "assignCategory":
+      case "splitTransaction":
       case "acceptSuggestion":
       case "ignoreTransaction":
       case "setPlanType":

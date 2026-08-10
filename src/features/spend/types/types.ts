@@ -195,6 +195,7 @@ export type SpendReviewItem = {
   transactionId: string;
   payee: string;
   amountLabel: string;
+  amountMinor: number;
   occurredAtLabel: string;
   description: string;
 };
@@ -263,6 +264,10 @@ export type SpendDataRepository = {
   getTransactionsForDay: (dateKey: string) => Promise<SpendTransaction[]>;
   createTransaction: (input: SpendSeedTransactionInput) => Promise<void>;
   assignCategory: (transactionId: string, categoryId: SpendCategoryId) => Promise<void>;
+  splitTransaction: (
+    transactionId: string,
+    allocations: Array<{categoryId: SpendCategoryId; amountMinor: number}>,
+  ) => Promise<void>;
   ignoreTransaction: (transactionId: string) => Promise<void>;
   setPlanType: (transactionId: string, planType: SpendPlanType) => Promise<void>;
   setBudgetAmount: (
@@ -319,6 +324,10 @@ export type SpendContextType = {
       opts?: { parentId?: SpendCategoryId },
     ) => Promise<void>;
     assignCategory: (transactionId: string, categoryId: SpendCategoryId) => Promise<void>;
+    splitTransaction: (
+      transactionId: string,
+      allocations: Array<{categoryId: SpendCategoryId; amountMinor: number}>,
+    ) => Promise<void>;
     ignoreTransaction: (transactionId: string) => Promise<void>;
     addManualTransaction: (input: {
       amountMinor: number;

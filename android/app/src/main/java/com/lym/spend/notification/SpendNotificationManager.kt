@@ -180,10 +180,15 @@ object SpendNotificationManager {
           SpendNotificationActions.rejectPendingIntent(context, row["id"].toString()),
         ).build(),
       )
+      builder.addAction(
+        Notification.Action.Builder(
+          Icon.createWithResource(context, android.R.drawable.ic_menu_edit),
+          "Split…",
+          SpendNotificationActions.splitPendingIntent(context, row["id"].toString()),
+        ).build(),
+      )
     } else {
-      // Android allows three actions, but More… is deliberately reserved so
-      // there are always two direct guesses and one escape hatch.
-      choices.take(2).forEach { choice ->
+      choices.take(1).forEach { choice ->
         builder.addAction(
           Notification.Action.Builder(
             Icon.createWithResource(context, android.R.drawable.ic_menu_add),
@@ -192,14 +197,23 @@ object SpendNotificationManager {
           ).build(),
         )
       }
+      builder.addAction(
+        Notification.Action.Builder(
+          Icon.createWithResource(context, android.R.drawable.ic_menu_edit),
+          "Split…",
+          SpendNotificationActions.splitPendingIntent(context, row["id"].toString()),
+        ).build(),
+      )
     }
-    builder.addAction(
-      Notification.Action.Builder(
-        Icon.createWithResource(context, android.R.drawable.ic_menu_edit),
-        "More…",
-        morePendingIntent(context, row["id"].toString()),
-      ).build(),
-    )
+    if (aiChoice == null) {
+      builder.addAction(
+        Notification.Action.Builder(
+          Icon.createWithResource(context, android.R.drawable.ic_menu_more),
+          "More…",
+          morePendingIntent(context, row["id"].toString()),
+        ).build(),
+      )
+    }
     return builder
   }
 

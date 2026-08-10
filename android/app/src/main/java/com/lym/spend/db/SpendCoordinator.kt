@@ -173,6 +173,7 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     is Command.RecordSourceAlert -> recordSourceAlert(database, command)
     is Command.UpdateAlertParseStatus -> updateAlertParseStatus(database, command)
     is Command.AssignCategory -> assignCategory(database, command)
+    is Command.SplitTransaction -> splitTransaction(database, command)
     is Command.AcceptSuggestion -> acceptSuggestion(database, command)
     is Command.SetBudgetAmount -> setBudgetAmount(database, command)
     is Command.ClearMonthBudget -> clearMonthBudget(database, command)
@@ -408,6 +409,37 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     bumpTransaction(database, transaction.id, transaction.revision, now)
     assertAllocationInvariant(database, transaction.id)
     rememberCategory(database, transaction.id, transaction.counterpartyKey, suggestion.categoryId, now)
+    return applied(command, transaction.id, transaction.revision + 1)
+  }
+
+  private fun splitTransaction(
+    database: SQLiteDatabase,
+    command: Command.SplitTransaction,
+  ): CommandResult {
+    val transaction = transaction(database, command.payload.transactionId)
+    assertExpectedRevision(transaction.id, command.expectedRevision, transaction.revision)
+    val allocations = command.payload.allocations
+    require(allocations.size >= 2) { "A split requires at least two categories" }
+    require(allocations.map { it.categoryId }.distinct().size == allocations.size) {
+      "Split categories must be unique"
+    }
+    require(allocations.all { it.amountMinor > 0 }) { "Split amounts must be positive" }
+    val now = System.currentTimeMillis()
+    database.execSQL("DELETE FROM transaction_allocations WHERE transaction_id = ?", arrayOf(transaction.id))
+    allocations.forEachIndexed { index, allocation ->
+      insertFullAllocation(
+        database,
+        allocation.allocationId ?: "${transaction.id}:split:$index",
+        transaction.id,
+        allocation.categoryId,
+        allocation.amountMinor,
+        AllocationSource.MANUAL,
+        null,
+        now,
+      )
+    }
+    assertAllocationInvariant(database, transaction.id)
+    bumpTransaction(database, transaction.id, transaction.revision, now)
     return applied(command, transaction.id, transaction.revision + 1)
   }
 
@@ -874,6 +906,7 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     is Command.RecordSourceAlert -> "source_alerts" to command.payload.id
     is Command.UpdateAlertParseStatus -> "source_alerts" to command.payload.alertId
     is Command.AssignCategory -> "transactions" to command.payload.transactionId
+    is Command.SplitTransaction -> "transactions" to command.payload.transactionId
     is Command.AcceptSuggestion -> "transactions" to command.payload.transactionId
     is Command.IgnoreTransaction -> "transactions" to command.payload.transactionId
     is Command.SetPlanType -> "transactions" to command.payload.transactionId

@@ -143,6 +143,7 @@ function buildLoadedData(
     transactionId: transaction.id,
     payee: transaction.merchantName,
     amountLabel: spendCurrency(transaction.amountMinor),
+    amountMinor: transaction.amountMinor,
     occurredAtLabel: new Intl.DateTimeFormat("en-IN", { day: "numeric", month: "short", timeZone: "Asia/Kolkata" }).format(new Date(transaction.occurredAt)),
     description: transaction.description,
   }));
@@ -319,6 +320,14 @@ export function SpendProvider({ children }: { children: ReactNode }) {
 
   const assignCategory = useCallback(async (transactionId: string, categoryId: SpendCategoryId) => {
     await repository.assignCategory(transactionId, categoryId);
+    await refreshAfterWrite();
+  }, [repository, refreshAfterWrite]);
+
+  const splitTransaction = useCallback(async (
+    transactionId: string,
+    allocations: Array<{categoryId: SpendCategoryId; amountMinor: number}>,
+  ) => {
+    await repository.splitTransaction(transactionId, allocations);
     await refreshAfterWrite();
   }, [repository, refreshAfterWrite]);
 
@@ -524,6 +533,7 @@ export function SpendProvider({ children }: { children: ReactNode }) {
         refreshGmailInbox: async () => {},
         assignReviewCategory,
         assignCategory,
+        splitTransaction,
         ignoreTransaction,
         addManualTransaction,
         setTransactionPlanType,
@@ -537,7 +547,7 @@ export function SpendProvider({ children }: { children: ReactNode }) {
         clearMonthBudget,
       },
     };
-  }, [loaded, dataRevision, hydrating, repository, selectedMonth, syncStates, grantSmsAccess, refreshSmsInbox, assignReviewCategory, assignCategory, ignoreTransaction, addManualTransaction, setTransactionPlanType, setPlanType, setBudgetAmount, carryForwardBudget, createCategory, renameCategory, archiveCategory, setBudget, clearMonthBudget]);
+  }, [loaded, dataRevision, hydrating, repository, selectedMonth, syncStates, grantSmsAccess, refreshSmsInbox, assignReviewCategory, assignCategory, splitTransaction, ignoreTransaction, addManualTransaction, setTransactionPlanType, setPlanType, setBudgetAmount, carryForwardBudget, createCategory, renameCategory, archiveCategory, setBudget, clearMonthBudget]);
 
   useEffect(() => {
     if (!loading) pushWidgetSnapshot(value.widgetSnapshot);

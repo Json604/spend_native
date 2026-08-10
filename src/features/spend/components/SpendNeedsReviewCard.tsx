@@ -9,6 +9,7 @@ type SpendNeedsReviewCardProps = {
   pendingCount: number;
   onSelectReview?: (transactionId: string) => void;
   onIgnoreReview?: (transactionId: string) => void;
+  onSplitReview?: (transactionId: string) => void;
 };
 
 export default function SpendNeedsReviewCard({
@@ -17,6 +18,7 @@ export default function SpendNeedsReviewCard({
   pendingCount,
   onSelectReview,
   onIgnoreReview,
+  onSplitReview,
 }: SpendNeedsReviewCardProps) {
   return (
     <SpendSurface>
@@ -57,6 +59,13 @@ export default function SpendNeedsReviewCard({
               <Text style={styles.promptHint} numberOfLines={2}>
                 {item.description}
               </Text>
+              <Pressable
+                onPress={() => onSplitReview?.(item.transactionId)}
+                style={({ pressed }) => [styles.splitButton, pressed && styles.buttonPressed]}
+              >
+                <MaterialCommunityIcons name="call-split" size={16} color="rgba(255, 232, 170, 0.96)" />
+                <Text style={styles.primaryButtonText}>Split across categories</Text>
+              </Pressable>
               <View style={styles.actionRow}>
                 <Pressable
                   onPress={() => onIgnoreReview?.(item.transactionId)}
@@ -176,6 +185,18 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     gap: 10,
     marginTop: 14,
+  },
+  splitButton: {
+    minHeight: 42,
+    marginTop: 14,
+    borderRadius: 16,
+    flexDirection: "row",
+    gap: 8,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(255, 215, 0, 0.10)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 215, 0, 0.20)",
   },
   secondaryButton: {
     flex: 1,

@@ -81,6 +81,20 @@ export interface AssignCategoryCommand {
   };
 }
 
+export interface SplitTransactionCommand {
+  commandId: string;
+  kind: "splitTransaction";
+  expectedRevision: number;
+  payload: {
+    transactionId: string;
+    allocations: Array<{
+      categoryId: string;
+      amountMinor: number;
+      allocationId?: string;
+    }>;
+  };
+}
+
 export interface AcceptSuggestionCommand {
   commandId: string;
   kind: "acceptSuggestion";
@@ -209,6 +223,7 @@ export interface ResolvePossibleMatchCommand {
 export type Command =
   | CreateTransactionFromAlertCommand
   | AssignCategoryCommand
+  | SplitTransactionCommand
   | AcceptSuggestionCommand
   | SetBudgetAmountCommand
   | ClearMonthBudgetCommand

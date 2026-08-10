@@ -58,6 +58,13 @@ export default function SpendMain() {
   const [isSavingReview, setIsSavingReview] = useState(false);
   const [selectedBucketDate, setSelectedBucketDate] = useState<string | null>(null);
   const [reviewCustomParentId, setReviewCustomParentId] = useState<string | null>(null);
+  const [splitModalVisible, setSplitModalVisible] = useState(false);
+  const [splitTransactionId, setSplitTransactionId] = useState<string | null>(null);
+  const [splitRows, setSplitRows] = useState<Array<{categoryId: string; amount: string}>>([
+    {categoryId: "", amount: ""},
+    {categoryId: "", amount: ""},
+  ]);
+  const [splitError, setSplitError] = useState<string | null>(null);
 
   const reviewCategoryOptions = useMemo(() => {
     return categoriesForMonthlyBudget(
@@ -110,6 +117,9 @@ export default function SpendMain() {
         navigation.navigate("SpendManualEntry");
       } else if (url.startsWith("lym://spend/budget")) {
         navigation.navigate("SpendBudgetPlanner");
+      } else if (url.startsWith("lym://spend/split/")) {
+        const transactionId = decodeURIComponent(url.slice("lym://spend/split/".length));
+        if (transactionId) openSplitModal(transactionId);
       }
     };
     Linking.getInitialURL().then(handle);
@@ -128,6 +138,58 @@ export default function SpendMain() {
 
   const activeReviewItem =
     reviewItems.find((item) => item.transactionId === selectedReviewTransactionId) ?? reviewItems[0];
+  const splitReviewItem = reviewItems.find((item) => item.transactionId === splitTransactionId);
+
+  const openSplitModal = (transactionId: string) => {
+    setSplitTransactionId(transactionId);
+    setSplitRows([{categoryId: "", amount: ""}, {categoryId: "", amount: ""}]);
+    setSplitError(null);
+    setReviewModalVisible(false);
+    setSplitModalVisible(true);
+  };
+
+  const closeSplitModal = () => {
+    if (isSavingReview) return;
+    setSplitModalVisible(false);
+    setSplitTransactionId(null);
+    setSplitError(null);
+  };
+
+  const parsedSplitRows = splitRows.map((row) => {
+    const amount = Number(row.amount || "0");
+    return {
+      categoryId: row.categoryId,
+      amountMinor: Number.isFinite(amount) ? Math.round(amount * 100) : 0,
+    };
+  });
+  const splitAssignedMinor = parsedSplitRows.reduce((sum, row) => sum + row.amountMinor, 0);
+  const splitRemainingMinor = (splitReviewItem?.amountMinor ?? 0) - splitAssignedMinor;
+  const splitCategoriesUnique = new Set(parsedSplitRows.map((row) => row.categoryId)).size === parsedSplitRows.length;
+  const canSaveSplit = Boolean(
+    splitReviewItem &&
+    splitRows.length >= 2 &&
+    parsedSplitRows.every((row) => row.categoryId && row.amountMinor > 0) &&
+    splitCategoriesUnique &&
+    splitRemainingMinor === 0,
+  );
+
+  const saveSplit = async () => {
+    if (!splitReviewItem || !canSaveSplit) return;
+    setIsSavingReview(true);
+    setSplitError(null);
+    try {
+      await actions.splitTransaction(
+        splitReviewItem.transactionId,
+        parsedSplitRows.map((row) => ({categoryId: row.categoryId as any, amountMinor: row.amountMinor})),
+      );
+      setSplitModalVisible(false);
+      setSplitTransactionId(null);
+    } catch (error) {
+      setSplitError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsSavingReview(false);
+    }
+  };
 
   const openReviewModal = (transactionId?: string) => {
     const next = transactionId ?? reviewItems[0]?.transactionId;
@@ -299,6 +361,7 @@ export default function SpendMain() {
               pendingCount={reviewItems.length}
               onSelectReview={openReviewModal}
               onIgnoreReview={ignoreReviewTransaction}
+              onSplitReview={openSplitModal}
             />
           </View>
         ) : null}
@@ -338,6 +401,17 @@ export default function SpendMain() {
             <Text style={styles.modalHint}>
               Pick a category or type your own. Future payments to the same payee reuse it.
             </Text>
+
+            {activeReviewItem ? (
+              <Pressable
+                disabled={isSavingReview}
+                onPress={() => openSplitModal(activeReviewItem.transactionId)}
+                style={styles.splitEntryButton}
+              >
+                <MaterialCommunityIcons name="call-split" size={17} color="#FFD27A" />
+                <Text style={styles.splitEntryText}>Split across categories</Text>
+              </Pressable>
+            ) : null}
 
             <View style={styles.optionWrap}>
               {reviewCategoryOptions.map((option) => (
@@ -427,6 +501,66 @@ export default function SpendMain() {
           </View>
         </View>
       </Modal>
+
+      <Modal animationType="fade" transparent visible={splitModalVisible} onRequestClose={closeSplitModal}>
+        <View style={styles.modalBackdrop}>
+          <Pressable style={StyleSheet.absoluteFillObject} onPress={closeSplitModal} />
+          <View style={[styles.modalSheet, {paddingBottom: Math.max(insets.bottom + 20, 28)}]}>
+            <Text style={styles.modalKicker}>Split payment</Text>
+            <Text style={styles.modalTitle}>{splitReviewItem?.payee ?? "Transaction"}</Text>
+            <Text style={styles.modalMeta}>{splitReviewItem?.amountLabel}</Text>
+            <ScrollView style={styles.splitScroll} keyboardShouldPersistTaps="handled">
+              {splitRows.map((row, rowIndex) => (
+                <View key={rowIndex} style={styles.splitRow}>
+                  <Text style={styles.inputLabel}>Category {rowIndex + 1}</Text>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.splitCategoryChoices}>
+                    {reviewCategoryOptions.map((option) => (
+                      <Pressable
+                        key={option.id}
+                        onPress={() => setSplitRows((current) => current.map((item, index) => index === rowIndex ? {...item, categoryId: option.id} : item))}
+                        style={[styles.optionChip, {borderColor: option.tint}, row.categoryId === option.id && styles.splitCategorySelected]}
+                      >
+                        <Text style={styles.optionLabel}>{option.label}</Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                  <TextInput
+                    keyboardType="decimal-pad"
+                    onChangeText={(amount) => setSplitRows((current) => current.map((item, index) => index === rowIndex ? {...item, amount} : item))}
+                    placeholder="Amount in ₹"
+                    placeholderTextColor="rgba(180,220,240,0.35)"
+                    style={styles.input}
+                    value={row.amount}
+                  />
+                  {splitRows.length > 2 ? (
+                    <Pressable onPress={() => setSplitRows((current) => current.filter((_, index) => index !== rowIndex))}>
+                      <Text style={styles.removeSplitText}>Remove row</Text>
+                    </Pressable>
+                  ) : null}
+                </View>
+              ))}
+              <Pressable onPress={() => setSplitRows((current) => [...current, {categoryId: "", amount: ""}])} style={styles.addSplitButton}>
+                <Text style={styles.addSplitText}>+ Add another category</Text>
+              </Pressable>
+            </ScrollView>
+            <Text style={[styles.splitBalance, splitRemainingMinor !== 0 && styles.splitBalancePending]}>
+              {splitRemainingMinor === 0
+                ? "Fully allocated"
+                : splitRemainingMinor > 0
+                  ? `₹${(splitRemainingMinor / 100).toFixed(2)} left to assign`
+                  : `₹${(Math.abs(splitRemainingMinor) / 100).toFixed(2)} over the transaction total`}
+            </Text>
+            {!splitCategoriesUnique ? <Text style={styles.splitError}>Choose each category only once.</Text> : null}
+            {splitError ? <Text style={styles.splitError}>{splitError}</Text> : null}
+            <View style={styles.modalActions}>
+              <Pressable onPress={closeSplitModal} style={styles.cancelButton}><Text style={styles.cancelButtonText}>Cancel</Text></Pressable>
+              <Pressable disabled={!canSaveSplit || isSavingReview} onPress={saveSplit} style={[styles.saveButton, (!canSaveSplit || isSavingReview) && styles.saveButtonDisabled]}>
+                <Text style={styles.saveButtonText}>{isSavingReview ? "Saving…" : "Save split"}</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -487,6 +621,8 @@ const styles = StyleSheet.create({
   modalTitle: { color: "#F5E6B8", fontSize: 20, fontWeight: "500", marginTop: 6 },
   modalMeta: { color: "#9C8B5C", fontSize: 12, marginTop: 4 },
   modalHint: { color: "#8F8F96", fontSize: 12, marginTop: 12, lineHeight: 18 },
+  splitEntryButton: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 14, paddingVertical: 11, borderRadius: 12, borderWidth: 1, borderColor: "rgba(255,210,122,0.28)", backgroundColor: "rgba(255,210,122,0.07)" },
+  splitEntryText: { color: "#FFD27A", fontSize: 13, fontWeight: "600" },
   optionWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 18 },
   optionChip: {
     flexDirection: "row",
@@ -519,6 +655,21 @@ const styles = StyleSheet.create({
     borderColor: "rgba(245,230,184,0.10)",
   },
   modalActions: { flexDirection: "row", gap: 8, marginTop: 18, justifyContent: "flex-end" },
+  splitScroll: { maxHeight: 430, marginTop: 8 },
+  splitRow: { paddingBottom: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "rgba(245,230,184,0.12)" },
+  splitCategoryChoices: { gap: 7, paddingRight: 10, paddingBottom: 10 },
+  splitCategorySelected: { backgroundColor: "rgba(255,210,122,0.18)", borderWidth: 2 },
+  removeSplitText: { color: "#FF8E72", fontSize: 12, marginTop: 9, alignSelf: "flex-end" },
+  addSplitButton: { paddingVertical: 13, alignItems: "center" },
+  addSplitText: { color: "#FFD27A", fontSize: 13, fontWeight: "600" },
+  splitBalance: { color: "#86D69C", fontSize: 13, fontWeight: "600", marginTop: 14 },
+  splitBalancePending: { color: "#FFD27A" },
+  splitError: { color: "#FF8E72", fontSize: 12, marginTop: 7 },
+  cancelButton: { paddingVertical: 11, paddingHorizontal: 16, borderRadius: 11, borderWidth: 1, borderColor: "rgba(245,230,184,0.14)" },
+  cancelButtonText: { color: "#D8CDB0", fontSize: 13, fontWeight: "600" },
+  saveButton: { paddingVertical: 11, paddingHorizontal: 17, borderRadius: 11, backgroundColor: "#FFD27A" },
+  saveButtonDisabled: { opacity: 0.4 },
+  saveButtonText: { color: "#21160A", fontSize: 13, fontWeight: "700" },
   modalBtn: {
     paddingVertical: 10,
     paddingHorizontal: 14,
