@@ -12,8 +12,12 @@ import {
   type ParsedSmsTransactionCandidate,
 } from '../parsers/smsTransactionParser';
 import {SpendSeedTransactionInput} from '../types/types';
+import {
+  resolveSmsPermissionState,
+  type SmsPermissionState,
+} from './smsPermissions';
 
-export type SmsPermissionState = 'granted' | 'denied' | 'unavailable';
+export type {SmsPermissionState} from './smsPermissions';
 
 export type SmsIngestionSnapshot = {
   capabilities: SmsNativeCapabilities;
@@ -81,11 +85,12 @@ export const getSmsPermissionState = async (): Promise<SmsPermissionState> => {
     return 'unavailable';
   }
 
-  const granted = await PermissionsAndroid.check(
-    PermissionsAndroid.PERMISSIONS.READ_SMS,
-  );
+  const [canReadInbox, canReceiveMessages] = await Promise.all([
+    PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.READ_SMS),
+    PermissionsAndroid.check(PermissionsAndroid.PERMISSIONS.RECEIVE_SMS),
+  ]);
 
-  return granted ? 'granted' : 'denied';
+  return resolveSmsPermissionState(canReadInbox, canReceiveMessages);
 };
 
 export const requestSmsReadPermission = async (): Promise<SmsPermissionState> => {
@@ -93,11 +98,17 @@ export const requestSmsReadPermission = async (): Promise<SmsPermissionState> =>
     return 'unavailable';
   }
 
-  const result = await PermissionsAndroid.request(
+  const results = await PermissionsAndroid.requestMultiple([
     PermissionsAndroid.PERMISSIONS.READ_SMS,
-  );
+    PermissionsAndroid.PERMISSIONS.RECEIVE_SMS,
+  ]);
 
-  return result === PermissionsAndroid.RESULTS.GRANTED ? 'granted' : 'denied';
+  return resolveSmsPermissionState(
+    results[PermissionsAndroid.PERMISSIONS.READ_SMS] ===
+      PermissionsAndroid.RESULTS.GRANTED,
+    results[PermissionsAndroid.PERMISSIONS.RECEIVE_SMS] ===
+      PermissionsAndroid.RESULTS.GRANTED,
+  );
 };
 
 export const startOfTodayMillis = (): number => {

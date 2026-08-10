@@ -32,7 +32,7 @@ object SpendNotificationManager {
 
   fun publishForTransaction(context: Context, coordinator: SpendCoordinator, transactionId: String) {
     val row = coordinator.query(
-      """SELECT t.id, t.merchant_raw, t.amount_minor, a.category_id, a.source
+      """SELECT t.id, t.merchant_raw, t.amount_minor, t.accounting_month_key, a.category_id, a.source
          FROM transactions t
          LEFT JOIN transaction_allocations a ON a.transaction_id = t.id
          WHERE t.id = ? AND t.deleted_at IS NULL""",
@@ -44,7 +44,7 @@ object SpendNotificationManager {
     if (row["category_id"] != null) return
 
     val suggestions = coordinator.query(
-      """SELECT s.category_id, c.label, s.confidence
+      """SELECT s.category_id, c.label, s.confidence, s.tier
          FROM suggestions s
          JOIN categories c ON c.id = s.category_id AND c.deleted_at IS NULL
          WHERE s.transaction_id = ?
@@ -55,20 +55,22 @@ object SpendNotificationManager {
       val categoryId = suggestion["category_id"]?.toString() ?: return@mapNotNull null
       val label = suggestion["label"]?.toString() ?: return@mapNotNull null
       val confidence = (suggestion["confidence"] as? Number)?.toDouble() ?: 0.0
-      Suggestion(categoryId, label, confidence)
+      Suggestion(categoryId, label, confidence, suggestion["tier"]?.toString().orEmpty())
     }
 
     val fallbackCategories = coordinator.query(
-      """SELECT id, label
-         FROM categories
-         WHERE deleted_at IS NULL AND id NOT IN ('uncategorized', 'needs-review')
-         ORDER BY label
+      """SELECT c.id, c.label
+         FROM categories c
+         JOIN budgets b ON b.category_id = c.id
+         WHERE c.deleted_at IS NULL AND c.id NOT IN ('uncategorized', 'needs-review')
+           AND b.month_key = ? AND b.amount_minor > 0
+         ORDER BY c.label
          LIMIT ?""",
-      arrayOf(ClassifierThresholds.NOTIFICATION_SUGGESTION_LIMIT.toString()),
+      arrayOf(row["accounting_month_key"].toString(), ClassifierThresholds.NOTIFICATION_SUGGESTION_LIMIT.toString()),
     ).mapNotNull { category ->
       val id = category["id"]?.toString() ?: return@mapNotNull null
       val label = category["label"]?.toString() ?: return@mapNotNull null
-      Suggestion(id, label, 0.0)
+      Suggestion(id, label, 0.0, "")
     }
     val choices = (suggestions + fallbackCategories).distinctBy { it.categoryId }
       .take(ClassifierThresholds.NOTIFICATION_SUGGESTION_LIMIT)
@@ -146,8 +148,11 @@ object SpendNotificationManager {
     val merchant = row["merchant_raw"]?.toString()?.takeIf(String::isNotBlank) ?: "New spend"
     val amount = (row["amount_minor"] as? Number)?.toLong() ?: 0L
     val title = "Categorise ${formatAmount(amount)}"
+    val aiChoice = choices.firstOrNull { it.tier == "llm" }
     val midConfidence = choices.firstOrNull()?.confidence ?: 0.0
-    val prompt = if (midConfidence >= ClassifierThresholds.NOTIFICATION_MID_CONFIDENCE) {
+    val prompt = if (aiChoice != null) {
+      "Groq suggests ${aiChoice.label} · $merchant"
+    } else if (midConfidence >= ClassifierThresholds.NOTIFICATION_MID_CONFIDENCE) {
       "Likely ${choices.first().label} · $merchant"
     } else {
       "Choose a category · $merchant"
@@ -160,16 +165,33 @@ object SpendNotificationManager {
       .setOnlyAlertOnce(true)
       .setContentIntent(morePendingIntent(context, row["id"].toString()))
 
-    // Android allows three actions, but More… is deliberately reserved so
-    // there are always two direct guesses and one escape hatch.
-    choices.take(2).forEach { choice ->
+    if (aiChoice != null) {
       builder.addAction(
         Notification.Action.Builder(
           Icon.createWithResource(context, android.R.drawable.ic_menu_add),
-          choice.label,
-          SpendNotificationActions.assignPendingIntent(context, row["id"].toString(), choice.categoryId),
+          "Yes",
+          SpendNotificationActions.assignPendingIntent(context, row["id"].toString(), aiChoice.categoryId),
         ).build(),
       )
+      builder.addAction(
+        Notification.Action.Builder(
+          Icon.createWithResource(context, android.R.drawable.ic_menu_close_clear_cancel),
+          "No",
+          SpendNotificationActions.rejectPendingIntent(context, row["id"].toString()),
+        ).build(),
+      )
+    } else {
+      // Android allows three actions, but More… is deliberately reserved so
+      // there are always two direct guesses and one escape hatch.
+      choices.take(2).forEach { choice ->
+        builder.addAction(
+          Notification.Action.Builder(
+            Icon.createWithResource(context, android.R.drawable.ic_menu_add),
+            choice.label,
+            SpendNotificationActions.assignPendingIntent(context, row["id"].toString(), choice.categoryId),
+          ).build(),
+        )
+      }
     }
     builder.addAction(
       Notification.Action.Builder(
@@ -209,5 +231,10 @@ object SpendNotificationManager {
   private fun formatAmount(amountMinor: Long): String = NumberFormat.getCurrencyInstance(Locale("en", "IN"))
     .format(amountMinor / 100.0)
 
-  private data class Suggestion(val categoryId: String, val label: String, val confidence: Double)
+  private data class Suggestion(
+    val categoryId: String,
+    val label: String,
+    val confidence: Double,
+    val tier: String,
+  )
 }

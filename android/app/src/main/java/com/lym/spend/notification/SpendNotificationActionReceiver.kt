@@ -14,7 +14,9 @@ import java.util.concurrent.Executors
 /** The only exported surface for notification category writes is this private receiver. */
 class SpendNotificationActionReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
-    if (intent.action != SpendNotificationActions.ACTION_ASSIGN) return
+    if (intent.action != SpendNotificationActions.ACTION_ASSIGN &&
+      intent.action != SpendNotificationActions.ACTION_REJECT
+    ) return
     val pendingResult = goAsync()
     executor.execute {
       try {
@@ -28,6 +30,11 @@ class SpendNotificationActionReceiver : BroadcastReceiver() {
   }
 
   internal fun handle(context: Context, coordinator: SpendCoordinator, intent: Intent) {
+    if (intent.action == SpendNotificationActions.ACTION_REJECT) {
+      val transactionId = parseRejectedTransaction(intent.data) ?: return
+      SpendNotificationManager.cancel(context, transactionId)
+      return
+    }
     val target = parseTarget(intent.data) ?: return
     try {
       val transaction = coordinator.query(
@@ -65,6 +72,11 @@ class SpendNotificationActionReceiver : BroadcastReceiver() {
     val segments = data.pathSegments
     if (segments.size != 2 || segments.any(String::isBlank)) return null
     return Target(Uri.decode(segments[0]), Uri.decode(segments[1]))
+  }
+
+  private fun parseRejectedTransaction(data: Uri?): String? {
+    if (data?.scheme != "spend" || data.host != "categorise-reject") return null
+    return data.pathSegments.singleOrNull()?.takeIf(String::isNotBlank)?.let(Uri::decode)
   }
 
   private data class Target(val transactionId: String, val categoryId: String)

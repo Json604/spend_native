@@ -73,6 +73,41 @@ class SecureTokenStoreModule(reactContext: ReactApplicationContext) :
     }
   }
 
+  @ReactMethod
+  fun getGroqApiKey(promise: Promise) {
+    try {
+      promise.resolve(readGroqApiKey(reactApplicationContext))
+    } catch (error: Throwable) {
+      promise.reject(ERROR, error.message, error)
+    }
+  }
+
+  @ReactMethod
+  fun setGroqApiKey(apiKey: String, promise: Promise) {
+    try {
+      val trimmed = apiKey.trim()
+      require(trimmed.isNotEmpty()) { "Groq API key cannot be empty" }
+      check(preferences.edit().putString(GROQ_API_KEY, encrypt(trimmed)).commit()) {
+        "Could not persist encrypted Groq API key"
+      }
+      promise.resolve(null)
+    } catch (error: Throwable) {
+      promise.reject(ERROR, error.message, error)
+    }
+  }
+
+  @ReactMethod
+  fun clearGroqApiKey(promise: Promise) {
+    try {
+      check(preferences.edit().remove(GROQ_API_KEY).commit()) {
+        "Could not remove Groq API key"
+      }
+      promise.resolve(null)
+    } catch (error: Throwable) {
+      promise.reject(ERROR, error.message, error)
+    }
+  }
+
   private fun quote(value: String): String =
     org.json.JSONObject.quote(value)
 
@@ -123,10 +158,28 @@ class SecureTokenStoreModule(reactContext: ReactApplicationContext) :
     private const val PREFERENCES = "spend_secure_auth"
     private const val SESSION_KEY = "encrypted_session"
     private const val DEVICE_ID_KEY = "encrypted_device_id"
+    private const val GROQ_API_KEY = "encrypted_groq_api_key"
     private const val KEYSTORE = "AndroidKeyStore"
     private const val KEY_ALIAS = "spend_auth_aes_gcm_v1"
     private const val TRANSFORMATION = "AES/GCM/NoPadding"
     private const val TAG_BITS = 128
     private const val ERROR = "SECURE_STORAGE_ERROR"
+
+    fun readGroqApiKey(context: android.content.Context): String? {
+      val encrypted = context.getSharedPreferences(PREFERENCES, 0)
+        .getString(GROQ_API_KEY, null) ?: return null
+      val parts = encrypted.split(":", limit = 2)
+      check(parts.size == 2) { "Malformed encrypted value" }
+      val keyStore = KeyStore.getInstance(KEYSTORE).apply { load(null) }
+      val secretKey = keyStore.getKey(KEY_ALIAS, null) as? SecretKey ?: return null
+      val cipher = Cipher.getInstance(TRANSFORMATION).apply {
+        init(
+          Cipher.DECRYPT_MODE,
+          secretKey,
+          GCMParameterSpec(TAG_BITS, Base64.decode(parts[0], Base64.NO_WRAP)),
+        )
+      }
+      return cipher.doFinal(Base64.decode(parts[1], Base64.NO_WRAP)).toString(Charsets.UTF_8)
+    }
   }
 }

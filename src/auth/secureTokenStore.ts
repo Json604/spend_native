@@ -11,6 +11,9 @@ type NativeSecureTokenStore = {
   setSession(access: string, refresh: string, userJson: string): Promise<void>;
   clearSession(): Promise<void>;
   getDeviceId(): Promise<string>;
+  getGroqApiKey(): Promise<string | null>;
+  setGroqApiKey(apiKey: string): Promise<void>;
+  clearGroqApiKey(): Promise<void>;
 };
 
 const store = NativeModules.SecureTokenStore as NativeSecureTokenStore;
@@ -35,4 +38,16 @@ export function clearSecureSession(): Promise<void> {
 
 export function secureDeviceId(): Promise<string> {
   return store.getDeviceId();
+}
+
+export function readGroqApiKey(): Promise<string | null> {
+  return store.getGroqApiKey();
+}
+
+export function writeGroqApiKey(apiKey: string): Promise<void> {
+  return store.setGroqApiKey(apiKey);
+}
+
+export function clearGroqApiKey(): Promise<void> {
+  return store.clearGroqApiKey();
 }

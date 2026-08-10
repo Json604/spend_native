@@ -456,7 +456,7 @@ export function SpendProvider({ children }: { children: ReactNode }) {
       if (permission === "unavailable") return;
       updateSyncState("sms", {
         status: permission === "granted" ? "ready" : "needs_permission",
-        ...(permission === "granted" ? {} : { detail: "SMS access is required to capture bank alerts." }),
+        ...(permission === "granted" ? {} : { detail: "SMS inbox and live-message access are required to capture bank alerts automatically." }),
       });
     };
     void syncPermissionState();

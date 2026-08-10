@@ -8,6 +8,7 @@ import com.lym.spend.db.NewTransactionPayload
 import com.lym.spend.db.SpendCoordinator
 import com.lym.spend.db.TransactionDirection
 import com.lym.spend.db.UpdateAlertParseStatusPayload
+import com.lym.spend.classify.GroqTransactionClassifier
 import com.lym.spend.notification.SpendNotificationManager
 import com.lym.spend.widget.SpendWidgetProvider
 import com.lym.spend.widget.SpendWidgetStorage
@@ -48,11 +49,14 @@ object SpendSmsIngestor {
       coordinator.execute(createTransactionCommand(alert, input.timestamp, parsed.transaction))
       // Publish only after the coordinator transaction commits. This keeps the
       // common action path safe when the app process is not running later.
-      SpendNotificationManager.publishForTransaction(
+      val transactionId = stableUuid("sms-transaction:${alert.id}").toString()
+      GroqTransactionClassifier.suggest(
         context.applicationContext,
         coordinator,
-        stableUuid("sms-transaction:${alert.id}").toString(),
+        transactionId,
+        input.body,
       )
+      SpendNotificationManager.publishForTransaction(context.applicationContext, coordinator, transactionId)
       SpendWidgetStorage.refreshFromDatabase(context.applicationContext, coordinator)
       SpendWidgetProvider.refreshAllWidgets(context.applicationContext)
     } else {

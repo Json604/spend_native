@@ -1,6 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {parseBudgetPaste} from '../src/features/spend/utils/parseBudgetPaste.ts';
+import {categoriesForMonthlyBudget} from '../src/features/spend/store/budgetSelectors.ts';
+
+test('review choices contain only this month budget categories and their parents', () => {
+  const categories = [
+    {id: 'food', label: 'Food'},
+    {id: 'groceries', label: 'Groceries', parentId: 'food'},
+    {id: 'travel', label: 'Travel'},
+    {id: 'old', label: 'Old category'},
+  ];
+  assert.deepEqual(
+    categoriesForMonthlyBudget(categories, {groceries: 500000, travel: 0}),
+    [categories[0], categories[1]],
+  );
+});
 
 test('accepts the separators people actually type', () => {
   const {entries, skipped} = parseBudgetPaste([

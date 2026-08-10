@@ -2,6 +2,7 @@ import {NativeModules, Platform} from 'react-native';
 
 export type SmsNativeCapabilities = {
   canReadInbox: boolean;
+  canReceiveMessages: boolean;
   isAndroid: boolean;
   moduleName: string;
   supportsInboxQueries: boolean;
@@ -43,6 +44,7 @@ export const getSpendSmsCapabilities =
     if (!hasSpendSmsNativeModule()) {
       return {
         canReadInbox: false,
+        canReceiveMessages: false,
         isAndroid: Platform.OS === 'android',
         moduleName: 'SpendSmsModule',
         supportsInboxQueries: false,

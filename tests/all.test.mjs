@@ -4,3 +4,4 @@ await import('./parser.test.mjs');
 await import('./coordinator.test.mjs');
 await import('./wireCommands.test.mjs');
 await import('./budgetPaste.test.mjs');
+await import('./smsPermissions.test.mjs');

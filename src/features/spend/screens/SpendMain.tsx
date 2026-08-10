@@ -26,6 +26,7 @@ import SpendDailyBarsCard from "../components/SpendDailyBarsCard";
 import SpendNeedsReviewCard from "../components/SpendNeedsReviewCard";
 import SpendMonthPager from "../components/SpendMonthPager";
 import { SpendScreenSkeleton } from "../components/SpendSkeleton";
+import { categoriesForMonthlyBudget } from "../store/budgetSelectors";
 
 export default function SpendMain() {
   const insets = useSafeAreaInsets();
@@ -58,12 +59,19 @@ export default function SpendMain() {
   const [selectedBucketDate, setSelectedBucketDate] = useState<string | null>(null);
   const [reviewCustomParentId, setReviewCustomParentId] = useState<string | null>(null);
 
+  const reviewCategoryOptions = useMemo(() => {
+    return categoriesForMonthlyBudget(
+      categoryOptions,
+      currentMonthBudget?.categoryBudgets,
+    );
+  }, [categoryOptions, currentMonthBudget]);
+
   const reviewRootOptions = useMemo(
     () =>
-      categoryOptions
+      reviewCategoryOptions
         .filter((opt) => !opt.parentId)
         .sort((a, b) => a.label.localeCompare(b.label)),
-    [categoryOptions],
+    [reviewCategoryOptions],
   );
 
   const activeBucket = useMemo(() => {
@@ -332,7 +340,7 @@ export default function SpendMain() {
             </Text>
 
             <View style={styles.optionWrap}>
-              {categoryOptions.map((option) => (
+              {reviewCategoryOptions.map((option) => (
                 <Pressable
                   key={option.id}
                   disabled={isSavingReview}

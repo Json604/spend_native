@@ -21,6 +21,7 @@ class SpendSmsModule(reactContext: ReactApplicationContext) :
     val payload = Arguments.createMap().apply {
       putBoolean("isAndroid", true)
       putBoolean("canReadInbox", hasReadSmsPermission())
+      putBoolean("canReceiveMessages", hasReceiveSmsPermission())
       putBoolean("supportsInboxQueries", true)
       putString("moduleName", MODULE_NAME)
     }
@@ -192,6 +193,13 @@ class SpendSmsModule(reactContext: ReactApplicationContext) :
     return ContextCompat.checkSelfPermission(
         reactApplicationContext,
         Manifest.permission.READ_SMS,
+    ) == PackageManager.PERMISSION_GRANTED
+  }
+
+  private fun hasReceiveSmsPermission(): Boolean {
+    return ContextCompat.checkSelfPermission(
+        reactApplicationContext,
+        Manifest.permission.RECEIVE_SMS,
     ) == PackageManager.PERMISSION_GRANTED
   }
 

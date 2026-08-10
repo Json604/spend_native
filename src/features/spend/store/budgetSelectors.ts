@@ -35,3 +35,24 @@ export function computePace(input: PaceInput): PaceResult | null {
 
   return { onPace, daysRemaining, remainingBudgetMinor, dailyTargetMinor };
 }
+
+export function categoriesForMonthlyBudget<
+  Category extends {id: string; parentId?: string},
+>(
+  categories: Category[],
+  categoryBudgets: Record<string, number> | undefined,
+): Category[] {
+  const budgetedIds = new Set(
+    Object.entries(categoryBudgets ?? {})
+      .filter(([, amountMinor]) => amountMinor > 0)
+      .map(([categoryId]) => categoryId),
+  );
+  const parentIds = new Set(
+    categories
+      .filter((category) => budgetedIds.has(category.id) && category.parentId)
+      .map((category) => category.parentId!),
+  );
+  return categories.filter(
+    (category) => budgetedIds.has(category.id) || parentIds.has(category.id),
+  );
+}

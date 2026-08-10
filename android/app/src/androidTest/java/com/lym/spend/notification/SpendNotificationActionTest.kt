@@ -117,6 +117,23 @@ class SpendNotificationActionTest {
     assertEquals("rule", state["source"])
   }
 
+  @Test
+  fun rejectingAiSuggestionLeavesTransactionForReview() = withFreshDatabase { coordinator ->
+    val transactionId = createTransaction(coordinator, "merchant:ask-first")
+    val intent = android.content.Intent(testContext(), SpendNotificationActionReceiver::class.java).apply {
+      action = SpendNotificationActions.ACTION_REJECT
+      data = android.net.Uri.parse("spend://categorise-reject/$transactionId")
+    }
+
+    SpendNotificationActionReceiver().handle(testContext(), coordinator, intent)
+
+    val allocation = coordinator.query(
+      "SELECT category_id FROM transaction_allocations WHERE transaction_id = ?",
+      arrayOf(transactionId),
+    ).single()
+    assertEquals(null, allocation["category_id"])
+  }
+
   private fun testContext(): Context = InstrumentationRegistry.getInstrumentation().targetContext
 
   private fun <T> withFreshDatabase(block: (SpendCoordinator) -> T): T {
