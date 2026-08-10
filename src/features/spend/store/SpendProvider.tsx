@@ -270,6 +270,7 @@ export function SpendProvider({ children }: { children: ReactNode }) {
     (async () => {
       try {
         await repository.ensureSystemCategories();
+        await repository.reconcileDuplicateSmsTransactions();
         if (!cancelled) await reload(selectedMonth);
       } catch (error) {
         if (!cancelled) Alert.alert("Spend database unavailable", error instanceof Error ? error.message : String(error));
@@ -480,7 +481,12 @@ export function SpendProvider({ children }: { children: ReactNode }) {
     getSmsPermissionState().then((permission) => {
       if (permission === "granted") refreshSmsInboxToday("Scanning today's SMS for transaction alerts.").catch(() => undefined);
     });
-    const smsSubscription = DeviceEventEmitter.addListener("spendSmsTransactionReceived", () => refreshSmsInboxToday("New SMS received. Updating today's spend.").catch(() => undefined));
+    // Native ingestion has already committed this SMS before emitting the event.
+    // Re-scanning the inbox here used to create the same payment under the JS
+    // inbox ID as well, leaving two identical rows in Needs Review.
+    const smsSubscription = DeviceEventEmitter.addListener("spendSmsTransactionReceived", () => {
+      reload(selectedMonth).catch(() => undefined);
+    });
     const appStateSubscription = AppState.addEventListener("change", (state) => {
       if (state === "active") {
         refreshSmsInboxToday("Refreshing today's SMS.").catch(() => undefined);
@@ -488,7 +494,7 @@ export function SpendProvider({ children }: { children: ReactNode }) {
       }
     });
     return () => { smsSubscription.remove(); appStateSubscription.remove(); };
-  }, [loading, refreshSmsInboxToday]);
+  }, [loading, refreshSmsInboxToday, reload, selectedMonth]);
 
   useEffect(() => {
     if (!user) return;

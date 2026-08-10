@@ -359,8 +359,19 @@ export class SqliteSpendRepository implements SpendDataRepository {
     const occurredAt = new Date(input.occurredAt).getTime();
     const monthKey = accountingMonthKey(occurredAt);
     const [existing] = await this.coordinator.query<SqlRow>(
-      "SELECT id FROM transactions WHERE id = ? AND accounting_month_key = ?",
-      [input.id, monthKey],
+      `SELECT t.id
+         FROM transactions t
+         LEFT JOIN source_alerts sa ON sa.transaction_id = t.id
+        WHERE t.deleted_at IS NULL AND t.status <> 'ignored'
+          AND (
+            (t.id = ? AND t.accounting_month_key = ?)
+            OR (
+              ? = 'sms' AND sa.raw_body = ? AND t.amount_minor = ?
+              AND t.direction = 'debit' AND ABS(t.received_at - ?) <= 300000
+            )
+          )
+        LIMIT 1`,
+      [input.id, monthKey, input.source, input.description, input.amountMinor, occurredAt],
     );
     if (existing) return;
 
@@ -404,6 +415,33 @@ export class SqliteSpendRepository implements SpendDataRepository {
       },
     };
     await this.coordinator.execute(command);
+  }
+
+  async reconcileDuplicateSmsTransactions(): Promise<number> {
+    const duplicates = await this.coordinator.query<SqlRow>(
+      `SELECT js.id
+         FROM transactions js
+         JOIN transaction_allocations jsa_alloc ON jsa_alloc.transaction_id = js.id
+         JOIN source_alerts jsa ON jsa.transaction_id = js.id
+        WHERE js.id LIKE 'sms:%'
+          AND js.deleted_at IS NULL AND js.status <> 'ignored'
+          AND jsa_alloc.category_id IS NULL
+          AND EXISTS (
+            SELECT 1
+              FROM transactions native
+              JOIN source_alerts native_alert ON native_alert.transaction_id = native.id
+             WHERE native.id <> js.id
+               AND native.deleted_at IS NULL AND native.status <> 'ignored'
+               AND native_alert.provider_message_id LIKE 'sms:%'
+               AND native_alert.raw_body = jsa.raw_body
+               AND native.amount_minor = js.amount_minor
+               AND ABS(native.received_at - js.occurred_at) <= 300000
+          )`,
+    );
+    for (const row of duplicates) {
+      await this.ignoreTransaction(stringValue(row.id));
+    }
+    return duplicates.length;
   }
 
   async assignCategory(transactionId: string, categoryId: SpendCategoryId): Promise<void> {
