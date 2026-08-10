@@ -77,12 +77,12 @@ object SpendWidgetStorage {
         // JS VM alive, which is exactly when a new spend needs to appear.
         val todaySpends = org.json.JSONArray().also { rows ->
             coordinator.query(
-                """SELECT merchant_name, amount_minor FROM transactions
+                """SELECT merchant_raw, amount_minor FROM transactions
                    WHERE direction = 'debit' AND status = 'posted' AND occurred_at >= ?
                    ORDER BY occurred_at DESC LIMIT 8""",
                 arrayOf(dayStart.toString()),
             ).forEach { row ->
-                val label = (row["merchant_name"] as? String)?.takeIf { it.isNotBlank() } ?: "Unknown payee"
+                val label = (row["merchant_raw"] as? String)?.takeIf { it.isNotBlank() } ?: "Unknown payee"
                 val minor = (row["amount_minor"] as? Long) ?: 0L
                 rows.put(JSONObject().put("label", label).put("amountLabel", "₹${formatAmount(minor)}"))
             }

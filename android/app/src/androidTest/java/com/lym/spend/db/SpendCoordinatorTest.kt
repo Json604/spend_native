@@ -8,6 +8,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.lym.spend.classify.ClassifierThresholds
 import com.lym.spend.sms.SmsIngestInput
 import com.lym.spend.sms.SpendSmsIngestor
+import com.lym.spend.widget.SpendWidgetStorage
 import java.io.File
 import java.lang.reflect.InvocationTargetException
 import java.util.Collections
@@ -23,6 +24,40 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class SpendCoordinatorTest {
+  @Test
+  fun widgetSnapshotRefreshReadsThePersistedMerchantColumn() = withFreshDatabase { coordinator ->
+    val now = System.currentTimeMillis()
+    val transactionId = UUID.randomUUID().toString()
+    coordinator.execute(
+      Command.CreateTransactionFromAlert(
+        UUID.randomUUID().toString(),
+        CreateTransactionFromAlertPayload(
+          alert = NewAlertPayload(
+            id = UUID.randomUUID().toString(),
+            rawBody = "Paid Rs.125.50 to Zepto",
+            receivedAt = now,
+          ),
+          transaction = NewTransactionPayload(
+            id = transactionId,
+            occurredAt = now,
+            receivedAt = now,
+            accountingMonthKey = java.text.SimpleDateFormat("yyyy-MM", java.util.Locale.ROOT)
+              .format(java.util.Date(now)),
+            amountMinor = 12_550,
+            direction = TransactionDirection.DEBIT,
+            merchantRaw = "Zepto",
+          ),
+        ),
+      ),
+    )
+
+    SpendWidgetStorage.refreshFromDatabase(testContext(), coordinator)
+    val snapshot = SpendWidgetStorage.readSnapshot(testContext())
+
+    assertTrue(snapshot.todaySpends.any { it.label == "Zepto" && it.amountLabel == "₹125.50" })
+    assertEquals("₹125.50", snapshot.todayFormatted)
+  }
+
   @Test
   fun migrationsApplyFromScratchAtTheNewestVersion() = withFreshDatabase { coordinator ->
     val newestVersion = Migrations.loadMigrationChain(testContext()).last().version

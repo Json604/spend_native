@@ -50,6 +50,12 @@ object SpendSmsIngestor {
       // Publish only after the coordinator transaction commits. This keeps the
       // common action path safe when the app process is not running later.
       val transactionId = stableUuid("sms-transaction:${alert.id}").toString()
+      // Keep the widget path entirely local and run it before Groq. A remote
+      // classification request can take several seconds, while BroadcastReceiver
+      // background execution is time-limited; the home-screen update must never
+      // sit behind network work or depend on that work succeeding.
+      SpendWidgetStorage.refreshFromDatabase(context.applicationContext, coordinator)
+      SpendWidgetProvider.refreshAllWidgets(context.applicationContext)
       GroqTransactionClassifier.suggest(
         context.applicationContext,
         coordinator,
@@ -57,8 +63,6 @@ object SpendSmsIngestor {
         input.body,
       )
       SpendNotificationManager.publishForTransaction(context.applicationContext, coordinator, transactionId)
-      SpendWidgetStorage.refreshFromDatabase(context.applicationContext, coordinator)
-      SpendWidgetProvider.refreshAllWidgets(context.applicationContext)
     } else {
       coordinator.execute(
         Command.UpdateAlertParseStatus(
