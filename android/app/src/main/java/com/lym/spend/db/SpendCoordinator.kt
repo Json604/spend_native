@@ -77,6 +77,27 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
       nextAttempt
     }
 
+  fun recoverDeadLettersOnce(migrationKey: String): Int =
+    spendDatabase.writeTransaction { database ->
+      val key = "dead_letter_recovery:$migrationKey"
+      if (metadata(database, key) != null) return@writeTransaction 0
+      val recovered = scalarInt(
+        database,
+        "SELECT COUNT(*) FROM outbox WHERE dead_lettered = 1",
+        emptyArray(),
+      ) ?: 0
+      database.execSQL(
+        """UPDATE outbox
+           SET attempt_count = 0, last_error = NULL, dead_lettered = 0, next_attempt_at = 0
+           WHERE dead_lettered = 1""",
+      )
+      database.execSQL(
+        "INSERT INTO sync_metadata (key, value) VALUES (?, ?)",
+        arrayOf(key, System.currentTimeMillis().toString()),
+      )
+      recovered
+    }
+
   /**
    * Applies every pulled command, then advances the cursor.
    *

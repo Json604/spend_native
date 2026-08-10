@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {nextPullCursor, normalizeRemoteCommand} from '../src/sync/wireCommands.ts';
+import {nextPullCursor, normalizeRemoteCommand, wireOperationId} from '../src/sync/wireCommands.ts';
 
 // A row as the server returns it from /v1/sync/pull.
 const pulled = (entity, action, fields, entityId = 'e-1') => ({
@@ -86,4 +86,16 @@ test('a cursor that does not move forward is ignored', () => {
 test('an empty starting cursor is treated as zero, not as text', () => {
   assert.equal(nextPullCursor(500, ''), '500');
   assert.equal(nextPullCursor(0, '0'), '0');
+});
+
+test('readable local command ids become stable UUIDs on the wire', () => {
+  const first = wireOperationId('sms-transaction:8393');
+  assert.equal(first, wireOperationId('sms-transaction:8393'));
+  assert.match(first, /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.notEqual(first, wireOperationId('sms-transaction:8394'));
+});
+
+test('valid UUID command ids are preserved on the wire', () => {
+  const id = '11111111-1111-4111-8111-111111111111';
+  assert.equal(wireOperationId(id), id);
 });

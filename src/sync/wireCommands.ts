@@ -14,6 +14,27 @@ export function parsePayload(value: string): unknown {
   }
 }
 
+export function wireOperationId(localId: string): string {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (uuid.test(localId)) return localId;
+
+  let first = 0x811c9dc5;
+  let second = 0x01000193;
+  for (let index = 0; index < localId.length; index += 1) {
+    first = Math.imul(first ^ localId.charCodeAt(index), 16777619) >>> 0;
+    second = Math.imul(second + localId.charCodeAt(index), 2246822519) >>> 0;
+  }
+  const hex = (value: number) => value.toString(16).padStart(8, "0");
+  const raw = `${hex(first)}${hex(second)}${hex(first ^ second)}${hex((first + second) >>> 0)}`;
+  return [
+    raw.slice(0, 8),
+    raw.slice(8, 12),
+    `5${raw.slice(13, 16)}`,
+    `${"89ab"[first & 3]}${raw.slice(17, 20)}`,
+    raw.slice(20, 32),
+  ].join("-");
+}
+
 export function normalizeRemoteCommand(operation: SyncOperation): Record<string, unknown> {
   const rawPayload = operation.payload;
   const payload = typeof rawPayload === "string" ? parsePayload(rawPayload) : rawPayload;

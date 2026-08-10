@@ -87,6 +87,19 @@ class SpendDatabaseModule(reactContext: ReactApplicationContext) :
   }
 
   @ReactMethod
+  fun recoverDeadLettersOnce(migrationKey: String, promise: Promise) {
+    executor.execute {
+      try {
+        promise.resolve(
+          SpendCoordinator.getInstance(reactApplicationContext).recoverDeadLettersOnce(migrationKey),
+        )
+      } catch (error: Throwable) {
+        rejectCommandError(promise, error)
+      }
+    }
+  }
+
+  @ReactMethod
   fun applyPulledOps(commandsJson: String, cursor: String, userId: String, promise: Promise) {
     executor.execute {
       try {

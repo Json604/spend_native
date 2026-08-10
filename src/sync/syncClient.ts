@@ -18,7 +18,7 @@ type OutboxRow = {
   created_at: number;
 };
 
-import { nextPullCursor, normalizeRemoteCommand, parsePayload, type SyncOperation } from "./wireCommands";
+import { nextPullCursor, normalizeRemoteCommand, parsePayload, wireOperationId, type SyncOperation } from "./wireCommands";
 
 type LocalSyncOperation = SyncOperation;
 type PushResponse = { applied?: unknown[]; conflicts?: unknown[] };
@@ -66,6 +66,7 @@ export class SpendSyncClient {
     let pulled = 0;
     let lastError: string | undefined;
     try {
+      await nativeSync.recoverDeadLettersOnce("wire_uuid_recovery_v1");
       pushed = await this.drainOutbox(await secureDeviceId());
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
@@ -165,10 +166,11 @@ export class SpendSyncClient {
       if (rows.length === 0) return pushed;
 
       const operations = rows.map((row) => toServerOperation(row));
+      const localIdByWireId = new Map(rows.map((row) => [wireOperationId(row.id), row.id]));
       try {
         const response = await this.push(operations, deviceId);
-        const appliedIds = idsFromResponse(response.applied);
-        const conflictIds = idsFromResponse(response.conflicts);
+        const appliedIds = localIdsFromResponse(response.applied, localIdByWireId);
+        const conflictIds = localIdsFromResponse(response.conflicts, localIdByWireId);
         if (appliedIds.size > 0) {
           pushed += await nativeSync.acknowledgeOutbox(JSON.stringify([...appliedIds]));
         }
@@ -290,7 +292,7 @@ function toServerOperation(row: OutboxRow): SyncOperation {
   // operation as well so a later pull can replay the same command through the
   // coordinator instead of treating the generic field payload as a mutation.
   return {
-    opId: row.id,
+    opId: wireOperationId(row.id),
     entity: row.table_name,
     entityId: row.row_id,
     // Archiving is a DELETE upstream. This was hardcoded to "upsert", so the
@@ -323,6 +325,16 @@ function idsFromResponse(values: unknown[] | undefined): Set<string> {
     }
   }
   return ids;
+}
+
+function localIdsFromResponse(
+  values: unknown[] | undefined,
+  localIdByWireId: Map<string, string>,
+): Set<string> {
+  return new Set([...idsFromResponse(values)].flatMap((id) => {
+    const localId = localIdByWireId.get(id);
+    return localId ? [localId] : [];
+  }));
 }
 
 
