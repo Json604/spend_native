@@ -46,8 +46,8 @@ android {
         applicationId 'com.lym.spend'
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 18
-        versionName "2.3.10"
+        versionCode 19
+        versionName "2.3.11"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
