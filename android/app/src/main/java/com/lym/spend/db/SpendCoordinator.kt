@@ -24,11 +24,7 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     if (result is CommandResult.Noop) {
       database.execSQL("DELETE FROM outbox WHERE id = ?", arrayOf(command.commandId))
     }
-    database.execSQL(
-      """INSERT INTO processed_commands (command_id, kind, result_json, created_at)
-         VALUES (?, ?, ?, ?)""",
-      arrayOf(command.commandId, command.kind, result.toJsonString(), System.currentTimeMillis()),
-    )
+    recordProcessed(database, command, result)
     result
   }
 
@@ -119,18 +115,17 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     val commands = JSONArray(commandsJson)
     val results = JSONArray()
     val rejected = JSONArray()
+    var persistError: Throwable? = null
     for (index in 0 until commands.length()) {
       val raw = commands.getString(index)
       try {
         val command = Command.fromJsonString(raw)
         val result = spendDatabase.writeTransaction { database ->
-          processedResult(database, command.commandId) ?: dispatch(database, command).also {
-            database.execSQL(
-              """INSERT INTO processed_commands (command_id, kind, result_json, created_at)
-                 VALUES (?, ?, ?, ?)""",
-              arrayOf(command.commandId, command.kind, it.toJsonString(), System.currentTimeMillis()),
-            )
+          val applied = processedResult(database, command.commandId) ?: dispatch(database, command).also {
+            recordProcessed(database, command, it)
           }
+          database.delete("sync_rejected", "command_id = ?", arrayOf(command.commandId))
+          applied
         }
         results.put(result.toJsonString())
       } catch (error: Throwable) {
@@ -139,9 +134,14 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
           .put("error", message)
           .put("command", raw.take(300))
         rejected.put(detail)
-        runCatching { upsertRejected(raw, message) }
+        try {
+          upsertRejected(raw, message)
+        } catch (persist: Throwable) {
+          if (persistError == null) persistError = persist
+        }
       }
     }
+    if (persistError != null) throw persistError
     spendDatabase.writeTransaction { database ->
       database.execSQL(
         "INSERT OR REPLACE INTO sync_metadata (key, value) VALUES (?, ?)",
@@ -159,7 +159,7 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
    * must not go through execute() — that would echo a new outbox row.
    */
   fun retryRejectedOps(): String {
-    val rows = query("SELECT command_id, command_json FROM sync_rejected ORDER BY created_at")
+    val rows = query("SELECT command_id, command_json FROM sync_rejected ORDER BY created_at, rowid")
     var applied = 0
     var rejected = 0
     for (row in rows) {
@@ -169,11 +169,7 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
         val command = Command.fromJsonString(commandJson)
         spendDatabase.writeTransaction { database ->
           processedResult(database, command.commandId) ?: dispatch(database, command).also {
-            database.execSQL(
-              """INSERT INTO processed_commands (command_id, kind, result_json, created_at)
-                 VALUES (?, ?, ?, ?)""",
-              arrayOf(command.commandId, command.kind, it.toJsonString(), System.currentTimeMillis()),
-            )
+            recordProcessed(database, command, it)
           }
           database.delete("sync_rejected", "command_id = ?", arrayOf(commandId))
         }
@@ -733,6 +729,15 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     return applied(command, match.id, match.revision + 1)
   }
 
+  private fun recordProcessed(database: SQLiteDatabase, command: Command, result: CommandResult) {
+    database.execSQL("DELETE FROM processed_commands WHERE command_id = ?", arrayOf(command.commandId))
+    database.execSQL(
+      """INSERT INTO processed_commands (command_id, kind, result_json, created_at)
+         VALUES (?, ?, ?, ?)""",
+      arrayOf(command.commandId, command.kind, result.toJsonString(), System.currentTimeMillis()),
+    )
+  }
+
   // INSERT OR IGNORE + UPDATE: older SQLite has no UPSERT.
   private fun upsertRejected(raw: String, error: String) {
     val commandId = runCatching { JSONObject(raw).optString("commandId", "") }.getOrDefault("")
@@ -755,10 +760,15 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     }
   }
 
-  private fun processedResult(database: SQLiteDatabase, commandId: String): CommandResult? =
-    querySingle(database, "SELECT result_json FROM processed_commands WHERE command_id = ?", arrayOf(commandId)) {
-      CommandResult.fromJsonString(it.getString(0))
-    }
+  private fun processedResult(database: SQLiteDatabase, commandId: String): CommandResult? {
+    val row = querySingle(
+      database,
+      "SELECT kind, result_json FROM processed_commands WHERE command_id = ?",
+      arrayOf(commandId),
+    ) { it.getString(0) to it.getString(1) } ?: return null
+    if (row.first == "rejected") return null
+    return runCatching { CommandResult.fromJsonString(row.second) }.getOrNull()
+  }
 
   private fun metadata(database: SQLiteDatabase, key: String): String? =
     querySingle(database, "SELECT value FROM sync_metadata WHERE key = ?", arrayOf(key)) {

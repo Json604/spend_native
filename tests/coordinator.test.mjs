@@ -472,6 +472,34 @@ test('version-1 databases migrate to 3 before serving queries', async () => {
   );
 });
 
+test('a version-2 database that already has sync_rejected still migrates to 3', async () => {
+  const dbPath = newDatabasePath('migration-v2-ensure');
+  const versionTwo = new DatabaseSync(dbPath);
+  versionTwo.exec(readFileSync(new URL('../db/migrations/001_initial.sql', import.meta.url), 'utf8'));
+  versionTwo.exec(readFileSync(new URL('../db/migrations/002_command_log.sql', import.meta.url), 'utf8'));
+  versionTwo.exec('PRAGMA user_version = 2');
+  versionTwo.exec(`CREATE TABLE IF NOT EXISTS sync_rejected (
+    command_id TEXT PRIMARY KEY,
+    command_json TEXT NOT NULL,
+    error TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`);
+  versionTwo.exec(`INSERT INTO processed_commands (command_id, kind, result_json, created_at)
+    VALUES ('old-reject', 'rejected', '{"error":"stale"}', 1)`);
+  versionTwo.close();
+
+  const coordinator = createNodeCoordinator(dbPath);
+  const [version] = await coordinator.query('PRAGMA user_version');
+  const leftover = await coordinator.query(
+    "SELECT count(*) AS n FROM processed_commands WHERE kind = 'rejected'",
+  );
+
+  assert.equal(version.user_version, 3);
+  assert.equal(Number(leftover[0].n), 0);
+});
+
 test('a database from a future schema version is refused, never reset', () => {
   const dbPath = newDatabasePath('migration-future');
   const future = new DatabaseSync(dbPath);

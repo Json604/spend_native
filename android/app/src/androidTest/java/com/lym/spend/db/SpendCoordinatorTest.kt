@@ -600,6 +600,7 @@ class SpendCoordinatorTest {
       .toString()
 
     coordinator.applyPulledOps(commandsJson, "cursor-after-page", userId)
+    coordinator.applyPulledOps(JSONArray().put(badJson).toString(), "cursor-after-retry", userId)
 
     val state = coordinator.query(
       """SELECT
@@ -608,15 +609,17 @@ class SpendCoordinatorTest {
            (SELECT count(*) FROM processed_commands WHERE command_id = ?) bad_processed,
            (SELECT count(*) FROM sync_rejected WHERE command_id = ?) rejected,
            (SELECT command_json FROM sync_rejected WHERE command_id = ?) rejected_json,
+           (SELECT attempt_count FROM sync_rejected WHERE command_id = ?) attempts,
            (SELECT value FROM sync_metadata WHERE key = 'pull_cursor') cursor""",
-      arrayOf(categoryId, good.commandId, badId, badId, badId),
+      arrayOf(categoryId, good.commandId, badId, badId, badId, badId),
     ).single()
     assertEquals(1L, state["categories"])
     assertEquals(1L, state["good_processed"])
     assertEquals(0L, state["bad_processed"])
     assertEquals(1L, state["rejected"])
     assertEquals(badJson, state["rejected_json"])
-    assertEquals("cursor-after-page", state["cursor"])
+    assertEquals(1L, state["attempts"])
+    assertEquals("cursor-after-retry", state["cursor"])
   }
 
   @Test
@@ -651,6 +654,135 @@ class SpendCoordinatorTest {
     assertEquals(1L, state["processed"])
     assertEquals(0L, state["rejected"])
     assertEquals(0L, state["outbox"])
+  }
+
+  @Test
+  fun retryRejectedOpsIncrementsAttemptCountWhenStillInvalid() = withFreshDatabase { coordinator ->
+    val badId = UUID.randomUUID().toString()
+    val badJson = JSONObject()
+      .put("commandId", badId)
+      .put("kind", "notACommand")
+      .put("payload", JSONObject())
+      .toString()
+    val now = System.currentTimeMillis()
+    writableDatabase(coordinator).execSQL(
+      """INSERT INTO sync_rejected (
+           command_id, command_json, error, attempt_count, created_at, updated_at
+         ) VALUES (?, ?, ?, 1, ?, ?)""",
+      arrayOf(badId, badJson, "previous failure", now, now),
+    )
+
+    val report = JSONObject(coordinator.retryRejectedOps())
+    val state = coordinator.query(
+      """SELECT command_json, attempt_count, error
+         FROM sync_rejected WHERE command_id = ?""",
+      arrayOf(badId),
+    ).single()
+
+    assertEquals(1, report.getInt("retried"))
+    assertEquals(0, report.getInt("applied"))
+    assertEquals(1, report.getInt("rejected"))
+    assertEquals(badJson, state["command_json"])
+    assertEquals(2L, state["attempt_count"])
+    assertTrue((state["error"] as String).isNotEmpty())
+  }
+
+  @Test
+  fun successfulApplyClearsAMatchingRejectedRow() = withFreshDatabase { coordinator ->
+    val userId = "user-1"
+    coordinator.claimLocalData(userId, "device-1")
+    val categoryId = UUID.randomUUID().toString()
+    val command = Command.CreateCategory(
+      UUID.randomUUID().toString(),
+      CreateCategoryPayload(categoryId, "Travel"),
+    )
+    val now = System.currentTimeMillis()
+    writableDatabase(coordinator).execSQL(
+      """INSERT INTO sync_rejected (
+           command_id, command_json, error, attempt_count, created_at, updated_at
+         ) VALUES (?, ?, ?, 1, ?, ?)""",
+      arrayOf(command.commandId, command.toJson().toString(), "previous failure", now, now),
+    )
+
+    coordinator.applyPulledOps(JSONArray().put(command.toJson().toString()).toString(), "cursor-2", userId)
+
+    val state = coordinator.query(
+      """SELECT
+           (SELECT count(*) FROM categories WHERE id = ?) categories,
+           (SELECT count(*) FROM sync_rejected WHERE command_id = ?) rejected""",
+      arrayOf(categoryId, command.commandId),
+    ).single()
+    assertEquals(1L, state["categories"])
+    assertEquals(0L, state["rejected"])
+  }
+
+  @Test
+  fun unparseableProcessedRejectedRowDoesNotBlockApply() = withFreshDatabase { coordinator ->
+    val userId = "user-1"
+    coordinator.claimLocalData(userId, "device-1")
+    val categoryId = UUID.randomUUID().toString()
+    val command = Command.CreateCategory(
+      UUID.randomUUID().toString(),
+      CreateCategoryPayload(categoryId, "Books"),
+    )
+    writableDatabase(coordinator).execSQL(
+      """INSERT INTO processed_commands (command_id, kind, result_json, created_at)
+         VALUES (?, ?, ?, ?)""",
+      arrayOf(
+        command.commandId,
+        "rejected",
+        JSONObject().put("error", "old").put("command", command.toJson().toString().take(300)).toString(),
+        System.currentTimeMillis(),
+      ),
+    )
+
+    coordinator.applyPulledOps(JSONArray().put(command.toJson().toString()).toString(), "cursor-3", userId)
+
+    val state = coordinator.query(
+      """SELECT
+           (SELECT count(*) FROM categories WHERE id = ?) categories,
+           (SELECT kind FROM processed_commands WHERE command_id = ?) kind""",
+      arrayOf(categoryId, command.commandId),
+    ).single()
+    assertEquals(1L, state["categories"])
+    assertEquals("createCategory", state["kind"])
+  }
+
+  @Test
+  fun persistFailureDoesNotAdvanceThePullCursor() = withFreshDatabase { coordinator ->
+    val userId = "user-1"
+    coordinator.claimLocalData(userId, "device-1")
+    val categoryId = UUID.randomUUID().toString()
+    val good = Command.CreateCategory(
+      UUID.randomUUID().toString(),
+      CreateCategoryPayload(categoryId, "Food"),
+    )
+    val badJson = JSONObject()
+      .put("commandId", UUID.randomUUID().toString())
+      .put("kind", "notACommand")
+      .put("payload", JSONObject())
+      .toString()
+    writableDatabase(coordinator).execSQL("DROP TABLE sync_rejected")
+
+    try {
+      coordinator.applyPulledOps(
+        JSONArray().put(good.toJson().toString()).put(badJson).toString(),
+        "cursor-must-not-advance",
+        userId,
+      )
+      fail("Expected persist of a rejected command to fail")
+    } catch (_: Throwable) {
+      // The good command is already committed; the page must be retried.
+    }
+
+    val state = coordinator.query(
+      """SELECT
+           (SELECT count(*) FROM categories WHERE id = ?) categories,
+           (SELECT value FROM sync_metadata WHERE key = 'pull_cursor') cursor""",
+      arrayOf(categoryId),
+    ).single()
+    assertEquals(1L, state["categories"])
+    assertEquals(null, state["cursor"])
   }
 
   private fun testContext(): Context = InstrumentationRegistry.getInstrumentation().targetContext
