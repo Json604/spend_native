@@ -138,7 +138,7 @@ export class SpendConflictError extends Error {
 }
 
 function loadDefaultCoordinator(): DatabaseCoordinator {
-  // Device default. Node tests construct this class with createNodeCoordinator.
+  // Lazy-load so this module has no runtime import of react-native.
   const loaded = require("../../../db/nativeCoordinator") as {
     nativeCoordinator: DatabaseCoordinator;
   };
@@ -200,7 +200,8 @@ export class SqliteSpendRepository implements SpendDataRepository {
            WHERE t.accounting_month_key = ? AND t.direction = 'debit'
              AND t.status NOT IN ('ignored') AND t.deleted_at IS NULL) AS transaction_count,
          (SELECT COUNT(*) FROM transactions t
-           LEFT JOIN transaction_allocations a ON a.transaction_id = t.id
+           LEFT JOIN transaction_allocations a ON a.id = (
+             SELECT MIN(a2.id) FROM transaction_allocations a2 WHERE a2.transaction_id = t.id)
            WHERE t.accounting_month_key = ? AND t.direction = 'debit'
              AND t.status NOT IN ('ignored') AND t.deleted_at IS NULL
              AND a.category_id IS NULL) AS review_count`,
@@ -250,10 +251,11 @@ export class SqliteSpendRepository implements SpendDataRepository {
   async dailyBuckets(monthKey: string): Promise<SpendDailyBucket[]> {
     const rows = await this.coordinator.query<SqlRow>(
       `SELECT strftime('%Y-%m-%d', t.occurred_at / 1000, 'unixepoch', '+5 hours', '+30 minutes') AS date_key,
-              SUM(t.amount_minor) AS amount_minor, COUNT(*) AS transaction_count
+              SUM(CASE WHEN t.plan_type = 'planned' THEN t.amount_minor ELSE 0 END) AS amount_minor,
+              COUNT(*) AS transaction_count
        FROM transactions t
        WHERE t.accounting_month_key = ? AND t.direction = 'debit'
-         AND t.plan_type = 'planned' AND t.status NOT IN ('ignored') AND t.deleted_at IS NULL
+         AND t.status NOT IN ('ignored') AND t.deleted_at IS NULL
        GROUP BY date_key ORDER BY date_key`,
       [monthKey],
     );
