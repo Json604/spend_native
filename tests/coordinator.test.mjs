@@ -667,3 +667,34 @@ test('an alias to an archived category is ignored, then retargeted onto the new 
   assert.equal(budgets[0].category_id, liveId);
   assert.equal(Number(budgets[0].amount_minor), 10_000);
 });
+
+test('an id-match createCategory does not steal aliases of a different archived label', async () => {
+  const {coordinator} = freshCoordinator('category-alias-id-match');
+  const archivedFood = await createCategory(coordinator, 'Food');
+  const remoteFood = randomUUID();
+  await coordinator.execute({
+    commandId: randomUUID(),
+    kind: 'createCategory',
+    payload: {categoryId: remoteFood, label: 'Food'},
+  });
+  await coordinator.execute({
+    commandId: randomUUID(),
+    kind: 'archiveCategory',
+    expectedRevision: 1,
+    payload: {categoryId: archivedFood},
+  });
+
+  const travelId = await createCategory(coordinator, 'Travel');
+  await coordinator.execute({
+    commandId: randomUUID(),
+    kind: 'createCategory',
+    payload: {categoryId: travelId, label: 'Food'},
+  });
+
+  const [alias] = await coordinator.query(
+    'SELECT local_id FROM category_aliases WHERE remote_id = ?',
+    [remoteFood],
+  );
+  assert.equal(alias.local_id, archivedFood);
+  assert.notEqual(alias.local_id, travelId);
+});

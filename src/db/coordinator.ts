@@ -691,8 +691,8 @@ class NodeDatabaseCoordinator implements DatabaseCoordinator {
     // device creates categories from SMS ingest before a sync ever arrives, and
     // categories_active_label_idx is unique on lower(label) where deleted_at IS
     // NULL. Treat that as the same category rather than failing.
-    const existing = this.#get<{ id: string; revision: number }>(
-      `SELECT id, revision FROM categories
+    const existing = this.#get<{ id: string; label: string; revision: number }>(
+      `SELECT id, label, revision FROM categories
        WHERE (id = ? OR lower(label) = lower(?)) AND deleted_at IS NULL
        LIMIT 1`,
       [command.payload.categoryId, command.payload.label],
@@ -704,7 +704,9 @@ class NodeDatabaseCoordinator implements DatabaseCoordinator {
       if (command.payload.categoryId !== existing.id) {
         this.#upsertCategoryAlias(command.payload.categoryId, existing.id);
       }
-      this.#retargetDeadAliases(existing.id, command.payload.label);
+      // Use the live row's stored label so an id-match against a renamed row
+      // cannot steal aliases from archived categories of payload.label.
+      this.#retargetDeadAliases(existing.id, existing.label);
       return applied(command, existing.id, existing.revision);
     }
     this.#run(

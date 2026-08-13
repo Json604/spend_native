@@ -560,14 +560,18 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     // a label clash both mean "this category is already here". Without this a
     // single collision aborts an entire pulled batch, which silently blocked
     // 500 ops from ever applying.
-    val existingId = database.rawQuery(
-      """SELECT id FROM categories
+    val existing = database.rawQuery(
+      """SELECT id, label FROM categories
           WHERE (id = ? OR lower(label) = lower(?)) AND deleted_at IS NULL
           LIMIT 1""",
       arrayOf(payload.categoryId, payload.label),
-    ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+    ).use { cursor ->
+      if (!cursor.moveToFirst()) null
+      else cursor.getString(0) to cursor.getString(1)
+    }
 
-    if (existingId != null) {
+    if (existing != null) {
+      val (existingId, existingLabel) = existing
       // A second device may have created the same label under a different id.
       // Later pulled ops still carry that remote id; map it onto the live row
       // so setBudgetAmount / allocations do not FK-fail.
@@ -577,7 +581,9 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
           arrayOf(payload.categoryId, existingId),
         )
       }
-      retargetDeadAliases(database, existingId, payload.label)
+      // Use the live row's stored label so an id-match against a renamed row
+      // cannot steal aliases from archived categories of payload.label.
+      retargetDeadAliases(database, existingId, existingLabel)
       // Idempotent no-op. Do NOT rewrite the existing row: the local one may
       // carry edits the incoming op predates.
       return applied(command, existingId, categoryRevision(database, existingId))
