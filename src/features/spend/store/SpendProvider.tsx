@@ -8,7 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { ActivityIndicator, Alert, AppState, type AppStateStatus, DeviceEventEmitter, View } from "react-native";
+import { ActivityIndicator, Alert, AppState, View } from "react-native";
 import type {
   CategoryBudgetMap,
   SpendCategoryId,
@@ -32,14 +32,7 @@ import {
   type SqliteSpendRepository,
 } from "./sqliteRepository";
 import { pushWidgetSnapshot } from "../services/widgetBridge";
-import {
-  convertSmsCandidatesToTransactions,
-  getSmsPermissionState,
-  loadSmsIngestionSnapshot,
-  requestSmsReadPermission,
-  startOfTodayMillis,
-} from "../services/smsIngestion";
-import { consumePendingSmsRefreshFlag } from "../services/smsNativeModule";
+import { useSmsInboxRefresh } from "../services/smsRefresh";
 import { useAuth } from "../../../auth/AuthProvider";
 import { syncClient } from "../../../sync/syncClient";
 import { syncEngine } from "../../../sync/syncEngine";
@@ -57,8 +50,8 @@ const initialSyncStates: SpendSyncState[] = [
   {
     source: "gmail",
     status: "idle",
-    label: "Gmail",
-    detail: "Connect Gmail to read transaction emails and dedupe overlaps.",
+    label: "Account",
+    detail: "Syncs this device with your signed-in account.",
     accent: "rgba(255, 255, 255, 0.85)",
   },
 ];
@@ -412,89 +405,13 @@ export function SpendProvider({ children }: { children: ReactNode }) {
     await refreshAfterWrite();
   }, [repository, refreshAfterWrite]);
 
-  const isRefreshingSms = useRef(false);
-  const refreshSmsInboxToday = useCallback(async (detail: string) => {
-    if (isRefreshingSms.current) return;
-    isRefreshingSms.current = true;
-    updateSyncState("sms", { status: "syncing", detail });
-    try {
-      const snapshot = await loadSmsIngestionSnapshot({ sinceMillis: startOfTodayMillis() });
-      for (const transaction of convertSmsCandidatesToTransactions(snapshot.parsedCandidates)) {
-        await repository.createTransaction(transaction);
-      }
-      // An ingest attempt reports what it INGESTED. Whether permission is
-      // granted is the permission watcher's business — letting this path also
-      // write "needs_permission" is what left the banner up after the user had
-      // already said yes.
-      if (snapshot.permission === "granted") {
-        updateSyncState("sms", {
-          status: "ready",
-          detail: snapshot.parsedCandidates.length ? `Today: ${snapshot.parsedCandidates.length} SMS transactions.` : "No transaction SMS found for today yet.",
-          lastSyncedAt: new Date(Date.now()).toISOString(),
-        });
-      }
-      await refreshAfterWrite();
-    } catch (error) {
-      updateSyncState("sms", { status: "error", detail: error instanceof Error ? error.message : "SMS sync failed." });
-    } finally {
-      isRefreshingSms.current = false;
-    }
-  }, [repository, refreshAfterWrite, updateSyncState]);
-
-  const refreshSmsInbox = useCallback(() => refreshSmsInboxToday("Scanning today's SMS for transaction alerts."), [refreshSmsInboxToday]);
-  const grantSmsAccess = useCallback(async () => {
-    const permission = await requestSmsReadPermission();
-    updateSyncState("sms", { status: permission === "granted" ? "ready" : "needs_permission", detail: permission === "granted" ? "SMS access granted." : "SMS access is still required." });
-    if (permission === "granted") await refreshSmsInbox();
-  }, [refreshSmsInbox, updateSyncState]);
-
-  /**
-   * The permission banner follows the ACTUAL permission, re-checked whenever
-   * the app comes forward.
-   *
-   * It used to be written only as a side effect of an ingest attempt, so a
-   * check that ran while the system dialog was still on screen recorded
-   * "denied" — and nothing ever looked again. The user granted access and the
-   * banner kept asking for it.
-   */
-  useEffect(() => {
-    if (loading) return;
-    let cancelled = false;
-    const syncPermissionState = async () => {
-      const permission = await getSmsPermissionState();
-      if (cancelled) return;
-      if (permission === "unavailable") return;
-      updateSyncState("sms", {
-        status: permission === "granted" ? "ready" : "needs_permission",
-        ...(permission === "granted" ? {} : { detail: "SMS inbox and live-message access are required to capture bank alerts automatically." }),
-      });
-    };
-    void syncPermissionState();
-    const subscription = AppState.addEventListener("change", (state: AppStateStatus) => {
-      if (state === "active") void syncPermissionState();
-    });
-    return () => { cancelled = true; subscription.remove(); };
-  }, [loading, updateSyncState]);
-
-  useEffect(() => {
-    if (loading) return;
-    getSmsPermissionState().then((permission) => {
-      if (permission === "granted") refreshSmsInboxToday("Scanning today's SMS for transaction alerts.").catch(() => undefined);
-    });
-    // Native ingestion has already committed this SMS before emitting the event.
-    // Re-scanning the inbox here used to create the same payment under the JS
-    // inbox ID as well, leaving two identical rows in Needs Review.
-    const smsSubscription = DeviceEventEmitter.addListener("spendSmsTransactionReceived", () => {
-      reload(selectedMonth).catch(() => undefined);
-    });
-    const appStateSubscription = AppState.addEventListener("change", (state) => {
-      if (state === "active") {
-        refreshSmsInboxToday("Refreshing today's SMS.").catch(() => undefined);
-        consumePendingSmsRefreshFlag().catch(() => undefined);
-      }
-    });
-    return () => { smsSubscription.remove(); appStateSubscription.remove(); };
-  }, [loading, refreshSmsInboxToday, reload, selectedMonth]);
+  const { refreshSmsInbox, grantSmsAccess } = useSmsInboxRefresh({
+    loading,
+    selectedMonth,
+    updateSyncState,
+    refreshAfterWrite,
+    reload,
+  });
 
   useEffect(() => {
     if (!user) return;
@@ -535,8 +452,6 @@ export function SpendProvider({ children }: { children: ReactNode }) {
       actions: {
         grantSmsAccess,
         refreshSmsInbox,
-        connectGmailInbox: async () => {},
-        refreshGmailInbox: async () => {},
         assignReviewCategory,
         assignCategory,
         splitTransaction,

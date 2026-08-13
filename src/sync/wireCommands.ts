@@ -129,7 +129,67 @@ export function deriveCommandFromWire(
     return { commandId, kind: "archiveCategory", payload: { categoryId: entityId } };
   }
 
+  if (entity === "transactions" || entity === "source_alerts") {
+    if (action !== "upsert") return null;
+    const nested = asRecord(inner.payload) ?? {};
+    const createPayload = createTransactionPayload(fields, nested, inner);
+    if (createPayload) {
+      return { commandId, kind: "createTransactionFromAlert", payload: createPayload };
+    }
+
+    const transactionId = asString(fields.transactionId)
+      ?? asString(nested.transactionId)
+      ?? asString(inner.transactionId);
+    const allocations = Array.isArray(fields.allocations)
+      ? fields.allocations
+      : Array.isArray(nested.allocations)
+        ? nested.allocations
+        : Array.isArray(inner.allocations)
+          ? inner.allocations
+          : null;
+    if (transactionId && allocations) {
+      return {
+        commandId,
+        kind: "splitTransaction",
+        payload: { transactionId, allocations },
+      };
+    }
+    if (transactionId && !allocations) {
+      const status = fields.status ?? nested.status ?? inner.status;
+      const reason = fields.reason ?? nested.reason ?? inner.reason;
+      if (status === "ignored" || reason === "ignore") {
+        return { commandId, kind: "ignoreTransaction", payload: { transactionId } };
+      }
+    }
+    return null;
+  }
+
   return null;
+}
+
+function createTransactionPayload(
+  fields: Record<string, unknown>,
+  nested: Record<string, unknown>,
+  inner: Record<string, unknown>,
+): Record<string, unknown> | null {
+  for (const candidate of [fields, nested, inner]) {
+    const alert = asRecord(candidate.alert);
+    const transaction = asRecord(candidate.transaction);
+    if (!alert || !transaction) continue;
+    const allocation = asRecord(candidate.allocation);
+    return {
+      alert,
+      transaction,
+      ...(allocation ? { allocation } : {}),
+    };
+  }
+  return null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
 
 function asString(value: unknown): string | null {

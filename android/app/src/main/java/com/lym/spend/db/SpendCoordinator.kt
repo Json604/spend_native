@@ -24,11 +24,7 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     if (result is CommandResult.Noop) {
       database.execSQL("DELETE FROM outbox WHERE id = ?", arrayOf(command.commandId))
     }
-    database.execSQL(
-      """INSERT INTO processed_commands (command_id, kind, result_json, created_at)
-         VALUES (?, ?, ?, ?)""",
-      arrayOf(command.commandId, command.kind, result.toJsonString(), System.currentTimeMillis()),
-    )
+    recordProcessed(database, command, result)
     result
   }
 
@@ -108,10 +104,8 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
    * batch forever, hitting the same wall: the app said "Backup paused, will
    * retry automatically" indefinitely while nothing moved in either direction.
    *
-   * A command that cannot apply is recorded as rejected and skipped rather than
-   * retried, because a poison op is otherwise permanent. It is counted and
-   * reported, never silently dropped: the caller surfaces the number so the data
-   * is known to be incomplete instead of quietly wrong.
+   * Failed commands go to sync_rejected with their full JSON so a later retry
+   * can apply them. The cursor still advances so later pages are not wedged.
    */
   fun applyPulledOps(commandsJson: String, cursor: String, userId: String): String {
     spendDatabase.writeTransaction { database ->
@@ -121,40 +115,33 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     val commands = JSONArray(commandsJson)
     val results = JSONArray()
     val rejected = JSONArray()
+    var persistError: Throwable? = null
     for (index in 0 until commands.length()) {
       val raw = commands.getString(index)
       try {
         val command = Command.fromJsonString(raw)
         val result = spendDatabase.writeTransaction { database ->
-          processedResult(database, command.commandId) ?: dispatch(database, command).also {
-            database.execSQL(
-              """INSERT INTO processed_commands (command_id, kind, result_json, created_at)
-                 VALUES (?, ?, ?, ?)""",
-              arrayOf(command.commandId, command.kind, it.toJsonString(), System.currentTimeMillis()),
-            )
+          val applied = processedResult(database, command.commandId) ?: dispatch(database, command).also {
+            recordProcessed(database, command, it)
           }
+          database.delete("sync_rejected", "command_id = ?", arrayOf(command.commandId))
+          applied
         }
         results.put(result.toJsonString())
       } catch (error: Throwable) {
+        val message = error.message ?: error::class.java.simpleName
         val detail = JSONObject()
-          .put("error", error.message ?: error::class.java.simpleName)
+          .put("error", message)
           .put("command", raw.take(300))
         rejected.put(detail)
-        // Mark it processed so the next pull does not stop on it again. The
-        // rejection is reported upward, so this is a decision the user can see
-        // rather than a silent discard.
-        runCatching {
-          val commandId = JSONObject(raw).optString("commandId", "")
-          if (commandId.isNotEmpty()) spendDatabase.writeTransaction { database ->
-            database.execSQL(
-              """INSERT OR IGNORE INTO processed_commands (command_id, kind, result_json, created_at)
-                 VALUES (?, ?, ?, ?)""",
-              arrayOf(commandId, "rejected", detail.toString(), System.currentTimeMillis()),
-            )
-          }
+        try {
+          upsertRejected(raw, message)
+        } catch (persist: Throwable) {
+          if (persistError == null) persistError = persist
         }
       }
     }
+    if (persistError != null) throw persistError
     spendDatabase.writeTransaction { database ->
       database.execSQL(
         "INSERT OR REPLACE INTO sync_metadata (key, value) VALUES (?, ?)",
@@ -163,6 +150,46 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     }
     return JSONObject()
       .put("applied", results)
+      .put("rejected", rejected)
+      .toString()
+  }
+
+  /**
+   * Re-dispatches every stored reject in its own transaction. Pulled retries
+   * must not go through execute() — that would echo a new outbox row.
+   */
+  fun retryRejectedOps(): String {
+    val rows = query("SELECT command_id, command_json FROM sync_rejected ORDER BY created_at, rowid")
+    var applied = 0
+    var rejected = 0
+    for (row in rows) {
+      val commandId = row["command_id"] as String
+      val commandJson = row["command_json"] as String
+      try {
+        val command = Command.fromJsonString(commandJson)
+        spendDatabase.writeTransaction { database ->
+          processedResult(database, command.commandId) ?: dispatch(database, command).also {
+            recordProcessed(database, command, it)
+          }
+          database.delete("sync_rejected", "command_id = ?", arrayOf(commandId))
+        }
+        applied += 1
+      } catch (error: Throwable) {
+        rejected += 1
+        val message = (error.message ?: error::class.java.simpleName).take(1_000)
+        spendDatabase.writeTransaction { database ->
+          database.execSQL(
+            """UPDATE sync_rejected
+               SET attempt_count = attempt_count + 1, error = ?, updated_at = ?
+               WHERE command_id = ?""",
+            arrayOf(message, System.currentTimeMillis(), commandId),
+          )
+        }
+      }
+    }
+    return JSONObject()
+      .put("retried", rows.size)
+      .put("applied", applied)
       .put("rejected", rejected)
       .toString()
   }
@@ -189,23 +216,27 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     }
   }
 
-  private fun dispatch(database: SQLiteDatabase, command: Command): CommandResult = when (command) {
-    is Command.CreateTransactionFromAlert -> createTransactionFromAlert(database, command)
-    is Command.RecordSourceAlert -> recordSourceAlert(database, command)
-    is Command.UpdateAlertParseStatus -> updateAlertParseStatus(database, command)
-    is Command.AssignCategory -> assignCategory(database, command)
-    is Command.SplitTransaction -> splitTransaction(database, command)
-    is Command.AcceptSuggestion -> acceptSuggestion(database, command)
-    is Command.SetBudgetAmount -> setBudgetAmount(database, command)
-    is Command.ClearMonthBudget -> clearMonthBudget(database, command)
-    is Command.CreateCategory -> createCategory(database, command)
-    is Command.RenameCategory -> renameCategory(database, command)
-    is Command.ArchiveCategory -> archiveCategory(database, command)
-    is Command.IgnoreTransaction -> ignoreTransaction(database, command)
-    is Command.SetPlanType -> setPlanType(database, command)
-    is Command.LinkRefund -> linkRefund(database, command)
-    is Command.RecordSuggestion -> recordSuggestion(database, command)
-    is Command.ResolvePossibleMatch -> resolvePossibleMatch(database, command)
+  private fun dispatch(database: SQLiteDatabase, command: Command): CommandResult {
+    // A never-aliased id is identity, so this is safe for local and pulled ops.
+    val resolved = resolveIncomingCategoryIds(database, command)
+    return when (resolved) {
+      is Command.CreateTransactionFromAlert -> createTransactionFromAlert(database, resolved)
+      is Command.RecordSourceAlert -> recordSourceAlert(database, resolved)
+      is Command.UpdateAlertParseStatus -> updateAlertParseStatus(database, resolved)
+      is Command.AssignCategory -> assignCategory(database, resolved)
+      is Command.SplitTransaction -> splitTransaction(database, resolved)
+      is Command.AcceptSuggestion -> acceptSuggestion(database, resolved)
+      is Command.SetBudgetAmount -> setBudgetAmount(database, resolved)
+      is Command.ClearMonthBudget -> clearMonthBudget(database, resolved)
+      is Command.CreateCategory -> createCategory(database, resolved)
+      is Command.RenameCategory -> renameCategory(database, resolved)
+      is Command.ArchiveCategory -> archiveCategory(database, resolved)
+      is Command.IgnoreTransaction -> ignoreTransaction(database, resolved)
+      is Command.SetPlanType -> setPlanType(database, resolved)
+      is Command.LinkRefund -> linkRefund(database, resolved)
+      is Command.RecordSuggestion -> recordSuggestion(database, resolved)
+      is Command.ResolvePossibleMatch -> resolvePossibleMatch(database, resolved)
+    }
   }
 
   private fun createTransactionFromAlert(
@@ -529,14 +560,30 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     // a label clash both mean "this category is already here". Without this a
     // single collision aborts an entire pulled batch, which silently blocked
     // 500 ops from ever applying.
-    val existingId = database.rawQuery(
-      """SELECT id FROM categories
+    val existing = database.rawQuery(
+      """SELECT id, label FROM categories
           WHERE (id = ? OR lower(label) = lower(?)) AND deleted_at IS NULL
           LIMIT 1""",
       arrayOf(payload.categoryId, payload.label),
-    ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+    ).use { cursor ->
+      if (!cursor.moveToFirst()) null
+      else cursor.getString(0) to cursor.getString(1)
+    }
 
-    if (existingId != null) {
+    if (existing != null) {
+      val (existingId, existingLabel) = existing
+      // A second device may have created the same label under a different id.
+      // Later pulled ops still carry that remote id; map it onto the live row
+      // so setBudgetAmount / allocations do not FK-fail.
+      if (payload.categoryId != existingId) {
+        database.execSQL(
+          "INSERT OR REPLACE INTO category_aliases (remote_id, local_id) VALUES (?, ?)",
+          arrayOf(payload.categoryId, existingId),
+        )
+      }
+      // Use the live row's stored label so an id-match against a renamed row
+      // cannot steal aliases from archived categories of payload.label.
+      retargetDeadAliases(database, existingId, existingLabel)
       // Idempotent no-op. Do NOT rewrite the existing row: the local one may
       // carry edits the incoming op predates.
       return applied(command, existingId, categoryRevision(database, existingId))
@@ -556,6 +603,13 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
         now,
       ),
     )
+    // A stale alias can point this new id at an archived row with the same
+    // label. Drop it so the live insert is not shadowed.
+    database.execSQL(
+      "DELETE FROM category_aliases WHERE remote_id = ?",
+      arrayOf(payload.categoryId),
+    )
+    retargetDeadAliases(database, payload.categoryId, payload.label)
     return applied(command, payload.categoryId, 1)
   }
 
@@ -702,10 +756,46 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     return applied(command, match.id, match.revision + 1)
   }
 
-  private fun processedResult(database: SQLiteDatabase, commandId: String): CommandResult? =
-    querySingle(database, "SELECT result_json FROM processed_commands WHERE command_id = ?", arrayOf(commandId)) {
-      CommandResult.fromJsonString(it.getString(0))
+  private fun recordProcessed(database: SQLiteDatabase, command: Command, result: CommandResult) {
+    database.execSQL("DELETE FROM processed_commands WHERE command_id = ?", arrayOf(command.commandId))
+    database.execSQL(
+      """INSERT INTO processed_commands (command_id, kind, result_json, created_at)
+         VALUES (?, ?, ?, ?)""",
+      arrayOf(command.commandId, command.kind, result.toJsonString(), System.currentTimeMillis()),
+    )
+  }
+
+  // INSERT OR IGNORE + UPDATE: older SQLite has no UPSERT.
+  private fun upsertRejected(raw: String, error: String) {
+    val commandId = runCatching { JSONObject(raw).optString("commandId", "") }.getOrDefault("")
+      .ifEmpty { raw }
+    val now = System.currentTimeMillis()
+    val message = error.take(1_000)
+    spendDatabase.writeTransaction { database ->
+      database.execSQL(
+        """INSERT OR IGNORE INTO sync_rejected (
+             command_id, command_json, error, attempt_count, created_at, updated_at
+           ) VALUES (?, ?, ?, 1, ?, ?)""",
+        arrayOf(commandId, raw, message, now, now),
+      )
+      database.execSQL(
+        """UPDATE sync_rejected
+           SET command_json = ?, error = ?, updated_at = ?
+           WHERE command_id = ?""",
+        arrayOf(raw, message, now, commandId),
+      )
     }
+  }
+
+  private fun processedResult(database: SQLiteDatabase, commandId: String): CommandResult? {
+    val row = querySingle(
+      database,
+      "SELECT kind, result_json FROM processed_commands WHERE command_id = ?",
+      arrayOf(commandId),
+    ) { it.getString(0) to it.getString(1) } ?: return null
+    if (row.first == "rejected") return null
+    return runCatching { CommandResult.fromJsonString(row.second) }.getOrNull()
+  }
 
   private fun metadata(database: SQLiteDatabase, key: String): String? =
     querySingle(database, "SELECT value FROM sync_metadata WHERE key = ?", arrayOf(key)) {
@@ -748,6 +838,72 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
   private fun categoryRevision(database: SQLiteDatabase, id: String): Int =
     scalarInt(database, "SELECT revision FROM categories WHERE id = ?", arrayOf(id))
       ?: throw RowNotFoundError(id)
+
+  private fun resolveCategoryId(database: SQLiteDatabase, id: String): String =
+    querySingle(
+      database,
+      """SELECT a.local_id
+         FROM category_aliases a
+         JOIN categories c ON c.id = a.local_id AND c.deleted_at IS NULL
+         WHERE a.remote_id = ?""",
+      arrayOf(id),
+    ) { it.getString(0) } ?: id
+
+  private fun retargetDeadAliases(database: SQLiteDatabase, liveId: String, label: String) {
+    database.execSQL(
+      """UPDATE category_aliases
+         SET local_id = ?
+         WHERE local_id IN (
+           SELECT id FROM categories
+           WHERE deleted_at IS NOT NULL AND lower(label) = lower(?)
+         )""",
+      arrayOf(liveId, label),
+    )
+  }
+
+  private fun resolveIncomingCategoryIds(database: SQLiteDatabase, command: Command): Command =
+    when (command) {
+      is Command.AssignCategory -> command.copy(
+        payload = command.payload.copy(categoryId = resolveCategoryId(database, command.payload.categoryId)),
+      )
+      is Command.SplitTransaction -> command.copy(
+        payload = command.payload.copy(
+          allocations = command.payload.allocations.map { allocation ->
+            allocation.copy(categoryId = resolveCategoryId(database, allocation.categoryId))
+          },
+        ),
+      )
+      is Command.SetBudgetAmount -> command.copy(
+        payload = command.payload.copy(categoryId = resolveCategoryId(database, command.payload.categoryId)),
+      )
+      is Command.RecordSuggestion -> command.copy(
+        payload = command.payload.copy(categoryId = resolveCategoryId(database, command.payload.categoryId)),
+      )
+      is Command.CreateTransactionFromAlert -> {
+        val allocation = command.payload.allocation
+        val categoryId = allocation?.categoryId
+        if (categoryId == null) command
+        else command.copy(
+          payload = command.payload.copy(
+            allocation = allocation.copy(categoryId = resolveCategoryId(database, categoryId)),
+          ),
+        )
+      }
+      is Command.CreateCategory -> {
+        val parentId = command.payload.parentId
+        if (parentId == null) command
+        else command.copy(
+          payload = command.payload.copy(parentId = resolveCategoryId(database, parentId)),
+        )
+      }
+      is Command.ArchiveCategory -> command.copy(
+        payload = command.payload.copy(categoryId = resolveCategoryId(database, command.payload.categoryId)),
+      )
+      is Command.RenameCategory -> command.copy(
+        payload = command.payload.copy(categoryId = resolveCategoryId(database, command.payload.categoryId)),
+      )
+      else -> command
+    }
 
   private fun hasManualAllocation(database: SQLiteDatabase, transactionId: String): Boolean =
     scalarInt(

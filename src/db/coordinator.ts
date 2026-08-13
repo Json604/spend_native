@@ -185,6 +185,18 @@ function ensureSyncSchema(db: DatabaseSync): void {
   }
   db.exec(`CREATE INDEX IF NOT EXISTS outbox_ready_created_at_idx
     ON outbox (dead_lettered, next_attempt_at, created_at)`);
+  db.exec(`CREATE TABLE IF NOT EXISTS sync_rejected (
+    command_id TEXT PRIMARY KEY,
+    command_json TEXT NOT NULL,
+    error TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`);
+  db.exec(`CREATE TABLE IF NOT EXISTS category_aliases (
+    remote_id TEXT PRIMARY KEY,
+    local_id TEXT NOT NULL REFERENCES categories(id)
+  )`);
 }
 
 function configureConnection(db: DatabaseSync): void {
@@ -354,35 +366,37 @@ class NodeDatabaseCoordinator implements DatabaseCoordinator {
   }
 
   #dispatch(command: Command): CommandResult {
-    switch (command.kind) {
+    // A never-aliased id is identity, so this is safe for local and pulled ops.
+    const resolved = this.#resolveIncomingCategoryIds(command);
+    switch (resolved.kind) {
       case "createTransactionFromAlert":
-        return this.#createTransactionFromAlert(command);
+        return this.#createTransactionFromAlert(resolved);
       case "assignCategory":
-        return this.#assignCategory(command);
+        return this.#assignCategory(resolved);
       case "splitTransaction":
-        return this.#splitTransaction(command);
+        return this.#splitTransaction(resolved);
       case "acceptSuggestion":
-        return this.#acceptSuggestion(command);
+        return this.#acceptSuggestion(resolved);
       case "setBudgetAmount":
-        return this.#setBudgetAmount(command);
+        return this.#setBudgetAmount(resolved);
       case "clearMonthBudget":
-        return this.#clearMonthBudget(command);
+        return this.#clearMonthBudget(resolved);
       case "createCategory":
-        return this.#createCategory(command);
+        return this.#createCategory(resolved);
       case "renameCategory":
-        return this.#renameCategory(command);
+        return this.#renameCategory(resolved);
       case "archiveCategory":
-        return this.#archiveCategory(command);
+        return this.#archiveCategory(resolved);
       case "ignoreTransaction":
-        return this.#ignoreTransaction(command);
+        return this.#ignoreTransaction(resolved);
       case "setPlanType":
-        return this.#setPlanType(command);
+        return this.#setPlanType(resolved);
       case "linkRefund":
-        return this.#linkRefund(command);
+        return this.#linkRefund(resolved);
       case "recordSuggestion":
-        return this.#recordSuggestion(command);
+        return this.#recordSuggestion(resolved);
       case "resolvePossibleMatch":
-        return this.#resolvePossibleMatch(command);
+        return this.#resolvePossibleMatch(resolved);
     }
   }
 
@@ -673,6 +687,28 @@ class NodeDatabaseCoordinator implements DatabaseCoordinator {
 
   #createCategory(command: CreateCategoryCommand): CommandResult {
     const now = Date.now();
+    // A category with this LABEL may already exist under a different id — the
+    // device creates categories from SMS ingest before a sync ever arrives, and
+    // categories_active_label_idx is unique on lower(label) where deleted_at IS
+    // NULL. Treat that as the same category rather than failing.
+    const existing = this.#get<{ id: string; label: string; revision: number }>(
+      `SELECT id, label, revision FROM categories
+       WHERE (id = ? OR lower(label) = lower(?)) AND deleted_at IS NULL
+       LIMIT 1`,
+      [command.payload.categoryId, command.payload.label],
+    );
+    if (existing) {
+      // A second device may have created the same label under a different id.
+      // Later pulled ops still carry that remote id; map it onto the live row
+      // so setBudgetAmount / allocations do not FK-fail.
+      if (command.payload.categoryId !== existing.id) {
+        this.#upsertCategoryAlias(command.payload.categoryId, existing.id);
+      }
+      // Use the live row's stored label so an id-match against a renamed row
+      // cannot steal aliases from archived categories of payload.label.
+      this.#retargetDeadAliases(existing.id, existing.label);
+      return applied(command, existing.id, existing.revision);
+    }
     this.#run(
       `INSERT INTO categories (
          id, label, tint, parent_id, is_system, catalog_version,
@@ -688,6 +724,12 @@ class NodeDatabaseCoordinator implements DatabaseCoordinator {
         now,
       ],
     );
+    // A stale alias can point this new id at an archived row with the same
+    // label. Drop it so the live insert is not shadowed.
+    this.#run("DELETE FROM category_aliases WHERE remote_id = ?", [
+      command.payload.categoryId,
+    ]);
+    this.#retargetDeadAliases(command.payload.categoryId, command.payload.label);
     return applied(command, command.payload.categoryId, 1);
   }
 
@@ -860,6 +902,118 @@ class NodeDatabaseCoordinator implements DatabaseCoordinator {
     );
     if (!row) throw new RowNotFoundError(id);
     return row;
+  }
+
+  #resolveCategoryId(id: string): string {
+    return (
+      this.#get<{ local_id: string }>(
+        `SELECT a.local_id
+         FROM category_aliases a
+         JOIN categories c ON c.id = a.local_id AND c.deleted_at IS NULL
+         WHERE a.remote_id = ?`,
+        [id],
+      )?.local_id ?? id
+    );
+  }
+
+  #upsertCategoryAlias(remoteId: string, localId: string): void {
+    this.#run(
+      "INSERT OR REPLACE INTO category_aliases (remote_id, local_id) VALUES (?, ?)",
+      [remoteId, localId],
+    );
+  }
+
+  #retargetDeadAliases(liveId: string, label: string): void {
+    this.#run(
+      `UPDATE category_aliases
+       SET local_id = ?
+       WHERE local_id IN (
+         SELECT id FROM categories
+         WHERE deleted_at IS NOT NULL AND lower(label) = lower(?)
+       )`,
+      [liveId, label],
+    );
+  }
+
+  #resolveIncomingCategoryIds(command: Command): Command {
+    switch (command.kind) {
+      case "assignCategory":
+        return {
+          ...command,
+          payload: {
+            ...command.payload,
+            categoryId: this.#resolveCategoryId(command.payload.categoryId),
+          },
+        };
+      case "splitTransaction":
+        return {
+          ...command,
+          payload: {
+            ...command.payload,
+            allocations: command.payload.allocations.map((allocation) => ({
+              ...allocation,
+              categoryId: this.#resolveCategoryId(allocation.categoryId),
+            })),
+          },
+        };
+      case "setBudgetAmount":
+        return {
+          ...command,
+          payload: {
+            ...command.payload,
+            categoryId: this.#resolveCategoryId(command.payload.categoryId),
+          },
+        };
+      case "recordSuggestion":
+        return {
+          ...command,
+          payload: {
+            ...command.payload,
+            categoryId: this.#resolveCategoryId(command.payload.categoryId),
+          },
+        };
+      case "createTransactionFromAlert": {
+        const allocation = command.payload.allocation;
+        if (!allocation?.categoryId) return command;
+        return {
+          ...command,
+          payload: {
+            ...command.payload,
+            allocation: {
+              ...allocation,
+              categoryId: this.#resolveCategoryId(allocation.categoryId),
+            },
+          },
+        };
+      }
+      case "createCategory":
+        if (!command.payload.parentId) return command;
+        return {
+          ...command,
+          payload: {
+            ...command.payload,
+            parentId: this.#resolveCategoryId(command.payload.parentId),
+          },
+        };
+      case "archiveCategory":
+        return {
+          ...command,
+          payload: {
+            ...command.payload,
+            categoryId: this.#resolveCategoryId(command.payload.categoryId),
+          },
+        };
+      case "renameCategory":
+        return {
+          ...command,
+          payload: {
+            ...command.payload,
+            categoryId: this.#resolveCategoryId(command.payload.categoryId),
+          },
+        };
+      default:
+        return command;
+    }
   }
 
   #replaceWithFullAllocation(

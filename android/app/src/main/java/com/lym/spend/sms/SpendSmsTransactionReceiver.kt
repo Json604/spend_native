@@ -28,7 +28,12 @@ class SpendSmsTransactionReceiver : BroadcastReceiver() {
     val sender = messages.firstOrNull()?.originatingAddress
     val body = messages.joinToString(separator = "") { it.messageBody.orEmpty() }
     val timestamp = messages.firstOrNull()?.timestampMillis ?: System.currentTimeMillis()
-    val subscriptionId = intent.getIntExtra(SubscriptionManager.EXTRA_SUBSCRIPTION_INDEX, -1)
+    val subscriptionId =
+      if (intent.hasExtra(SubscriptionManager.EXTRA_SUBSCRIPTION_INDEX)) {
+        intent.getIntExtra(SubscriptionManager.EXTRA_SUBSCRIPTION_INDEX, -1)
+      } else {
+        null
+      }
     val pendingResult = goAsync()
     ingestionExecutor.execute {
       try {

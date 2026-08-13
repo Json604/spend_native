@@ -1,10 +1,5 @@
 import type { Command, CommandResult } from "../../../db/commands";
 import type { DatabaseCoordinator } from "../../../db/coordinator";
-import {
-  ConflictError,
-  nativeCoordinator,
-} from "../../../db/nativeCoordinator";
-import { SPEND_CATEGORY_DEFINITIONS } from "../categories/categorySeeds";
 import type {
   CategoryBudgetMap,
   MonthlyBudget,
@@ -126,18 +121,47 @@ function mapCategory(row: SqlRow): SpendCategoryDefinition {
 
 export class SpendConflictError extends Error {
   readonly code = "CONFLICT" as const;
+  readonly entityId: string;
+  readonly expectedRevision: number;
+  readonly currentRevision: number;
   constructor(
-    readonly entityId: string,
-    readonly expectedRevision: number,
-    readonly currentRevision: number,
+    entityId: string,
+    expectedRevision: number,
+    currentRevision: number,
   ) {
     super(`The ${entityId} changed while you were editing it. Please review the latest value and try again.`);
     this.name = "SpendConflictError";
+    this.entityId = entityId;
+    this.expectedRevision = expectedRevision;
+    this.currentRevision = currentRevision;
   }
 }
 
+function loadDefaultCoordinator(): DatabaseCoordinator {
+  // Lazy-load so this module has no runtime import of react-native.
+  const loaded = require("../../../db/nativeCoordinator") as {
+    nativeCoordinator: DatabaseCoordinator;
+  };
+  return loaded.nativeCoordinator;
+}
+
+function isConflictError(
+  error: unknown,
+): error is {entityId: string; expectedRevision: number} {
+  return error instanceof Error && error.name === "ConflictError" && "entityId" in error && "expectedRevision" in error;
+}
+
 export class SqliteSpendRepository implements SpendDataRepository {
-  constructor(private readonly coordinator: DatabaseCoordinator = nativeCoordinator) {}
+  #coordinator: DatabaseCoordinator | undefined;
+
+  constructor(coordinator?: DatabaseCoordinator) {
+    this.#coordinator = coordinator;
+  }
+
+  private get coordinator(): DatabaseCoordinator {
+    this.#coordinator ??= loadDefaultCoordinator();
+    return this.#coordinator;
+  }
 
   /**
    * Months the user actually has something in — any transaction or any budget —
@@ -176,7 +200,8 @@ export class SqliteSpendRepository implements SpendDataRepository {
            WHERE t.accounting_month_key = ? AND t.direction = 'debit'
              AND t.status NOT IN ('ignored') AND t.deleted_at IS NULL) AS transaction_count,
          (SELECT COUNT(*) FROM transactions t
-           LEFT JOIN transaction_allocations a ON a.transaction_id = t.id
+           LEFT JOIN transaction_allocations a ON a.id = (
+             SELECT MIN(a2.id) FROM transaction_allocations a2 WHERE a2.transaction_id = t.id)
            WHERE t.accounting_month_key = ? AND t.direction = 'debit'
              AND t.status NOT IN ('ignored') AND t.deleted_at IS NULL
              AND a.category_id IS NULL) AS review_count`,
@@ -226,7 +251,8 @@ export class SqliteSpendRepository implements SpendDataRepository {
   async dailyBuckets(monthKey: string): Promise<SpendDailyBucket[]> {
     const rows = await this.coordinator.query<SqlRow>(
       `SELECT strftime('%Y-%m-%d', t.occurred_at / 1000, 'unixepoch', '+5 hours', '+30 minutes') AS date_key,
-              SUM(t.amount_minor) AS amount_minor, COUNT(*) AS transaction_count
+              SUM(CASE WHEN t.plan_type = 'planned' THEN t.amount_minor ELSE 0 END) AS amount_minor,
+              COUNT(*) AS transaction_count
        FROM transactions t
        WHERE t.accounting_month_key = ? AND t.direction = 'debit'
          AND t.status NOT IN ('ignored') AND t.deleted_at IS NULL
@@ -273,7 +299,8 @@ export class SqliteSpendRepository implements SpendDataRepository {
       `SELECT t.*, a.category_id, a.source AS allocation_source,
               c.label AS category_label, sa.provider_message_id, sa.raw_body
        FROM transactions t
-       LEFT JOIN transaction_allocations a ON a.transaction_id = t.id
+       LEFT JOIN transaction_allocations a ON a.id = (
+         SELECT MIN(a2.id) FROM transaction_allocations a2 WHERE a2.transaction_id = t.id)
        LEFT JOIN categories c ON c.id = a.category_id
        LEFT JOIN source_alerts sa ON sa.transaction_id = t.id
        WHERE t.accounting_month_key = ?
@@ -314,7 +341,8 @@ export class SqliteSpendRepository implements SpendDataRepository {
       `SELECT t.*, a.category_id, a.source AS allocation_source,
               c.label AS category_label, sa.provider_message_id, sa.raw_body
        FROM transactions t
-       LEFT JOIN transaction_allocations a ON a.transaction_id = t.id
+       LEFT JOIN transaction_allocations a ON a.id = (
+         SELECT MIN(a2.id) FROM transaction_allocations a2 WHERE a2.transaction_id = t.id)
        LEFT JOIN categories c ON c.id = a.category_id
        LEFT JOIN source_alerts sa ON sa.transaction_id = t.id
        WHERE t.accounting_month_key = ? AND t.direction = 'debit'
@@ -331,7 +359,8 @@ export class SqliteSpendRepository implements SpendDataRepository {
       `SELECT t.*, a.category_id, a.source AS allocation_source,
               c.label AS category_label, sa.provider_message_id, sa.raw_body
        FROM transactions t
-       LEFT JOIN transaction_allocations a ON a.transaction_id = t.id
+       LEFT JOIN transaction_allocations a ON a.id = (
+         SELECT MIN(a2.id) FROM transaction_allocations a2 WHERE a2.transaction_id = t.id)
        LEFT JOIN categories c ON c.id = a.category_id
        LEFT JOIN source_alerts sa ON sa.transaction_id = t.id
        WHERE t.accounting_month_key = ? AND t.deleted_at IS NULL
@@ -543,6 +572,7 @@ export class SqliteSpendRepository implements SpendDataRepository {
   }
 
   async ensureSystemCategories(): Promise<void> {
+    const { SPEND_CATEGORY_DEFINITIONS } = require("../categories/categorySeeds") as typeof import("../categories/categorySeeds");
     const monthKey = accountingMonthKey();
     const existing = new Set((await this.categories(monthKey)).map((category) => category.id));
     for (const category of SPEND_CATEGORY_DEFINITIONS) {
@@ -584,7 +614,7 @@ export class SqliteSpendRepository implements SpendDataRepository {
     try {
       return await this.coordinator.execute(command);
     } catch (error) {
-      if (!(error instanceof ConflictError)) throw error;
+      if (!isConflictError(error)) throw error;
       const currentRevision = await reread();
       throw new SpendConflictError(error.entityId, error.expectedRevision, currentRevision);
     }

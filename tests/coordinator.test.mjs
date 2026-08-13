@@ -446,7 +446,7 @@ test('an incomplete split rolls back and preserves the original allocation', asy
   assert.deepEqual(rows.map(row => ({...row})), [{category_id: null, amount_minor: 10_000}]);
 });
 
-test('version-1 databases migrate to 2 before serving queries', async () => {
+test('version-1 databases migrate to 4 before serving queries', async () => {
   const dbPath = newDatabasePath('migration-v1');
   const versionOne = new DatabaseSync(dbPath);
   versionOne.exec(readFileSync(new URL('../db/migrations/001_initial.sql', import.meta.url), 'utf8'));
@@ -457,12 +457,54 @@ test('version-1 databases migrate to 2 before serving queries', async () => {
   const commandLogColumns = await coordinator.query(
     "SELECT name FROM pragma_table_info('processed_commands') ORDER BY cid",
   );
+  const rejectedColumns = await coordinator.query(
+    "SELECT name FROM pragma_table_info('sync_rejected') ORDER BY cid",
+  );
+  const aliasColumns = await coordinator.query(
+    "SELECT name FROM pragma_table_info('category_aliases') ORDER BY cid",
+  );
 
-  assert.equal(version.user_version, 2);
+  assert.equal(version.user_version, 4);
   assert.deepEqual(
     commandLogColumns.map(column => column.name),
     ['command_id', 'kind', 'result_json', 'created_at'],
   );
+  assert.deepEqual(
+    rejectedColumns.map(column => column.name),
+    ['command_id', 'command_json', 'error', 'attempt_count', 'created_at', 'updated_at'],
+  );
+  assert.deepEqual(
+    aliasColumns.map(column => column.name),
+    ['remote_id', 'local_id'],
+  );
+});
+
+test('a version-2 database that already has sync_rejected still migrates to 4', async () => {
+  const dbPath = newDatabasePath('migration-v2-ensure');
+  const versionTwo = new DatabaseSync(dbPath);
+  versionTwo.exec(readFileSync(new URL('../db/migrations/001_initial.sql', import.meta.url), 'utf8'));
+  versionTwo.exec(readFileSync(new URL('../db/migrations/002_command_log.sql', import.meta.url), 'utf8'));
+  versionTwo.exec('PRAGMA user_version = 2');
+  versionTwo.exec(`CREATE TABLE IF NOT EXISTS sync_rejected (
+    command_id TEXT PRIMARY KEY,
+    command_json TEXT NOT NULL,
+    error TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`);
+  versionTwo.exec(`INSERT INTO processed_commands (command_id, kind, result_json, created_at)
+    VALUES ('old-reject', 'rejected', '{"error":"stale"}', 1)`);
+  versionTwo.close();
+
+  const coordinator = createNodeCoordinator(dbPath);
+  const [version] = await coordinator.query('PRAGMA user_version');
+  const leftover = await coordinator.query(
+    "SELECT count(*) AS n FROM processed_commands WHERE kind = 'rejected'",
+  );
+
+  assert.equal(version.user_version, 4);
+  assert.equal(Number(leftover[0].n), 0);
 });
 
 test('a database from a future schema version is refused, never reset', () => {
@@ -473,7 +515,7 @@ test('a database from a future schema version is refused, never reset', () => {
 
   assert.throws(
     () => createNodeCoordinator(dbPath),
-    /user_version 99 is newer than supported version 2/,
+    /user_version 99 is newer than supported version 4/,
   );
 
   const unchanged = new DatabaseSync(dbPath);
@@ -517,4 +559,142 @@ test('replaying a transaction creation under a new command id is a no-op', async
   assert.equal(allocations.length, 1);
   assert.equal(allocations[0].category_id, category);
   assert.equal(allocations[0].source, 'manual');
+});
+
+test('a pulled createCategory with the same label aliases onto the live local row', async () => {
+  const {coordinator} = freshCoordinator('category-alias');
+  const localId = await createCategory(coordinator, 'Food');
+  const remoteId = randomUUID();
+
+  await coordinator.execute({
+    commandId: randomUUID(),
+    kind: 'createCategory',
+    payload: {categoryId: remoteId, label: 'Food'},
+  });
+
+  await coordinator.execute({
+    commandId: randomUUID(),
+    kind: 'setBudgetAmount',
+    expectedRevision: 0,
+    payload: {
+      monthKey: '2026-08',
+      categoryId: remoteId,
+      amountMinor: 10_000,
+    },
+  });
+
+  const aliases = await coordinator.query(
+    'SELECT remote_id, local_id FROM category_aliases WHERE remote_id = ?',
+    [remoteId],
+  );
+  assert.equal(aliases.length, 1);
+  assert.equal(aliases[0].remote_id, remoteId);
+  assert.equal(aliases[0].local_id, localId);
+
+  const budgets = await coordinator.query(
+    'SELECT category_id, amount_minor FROM budgets WHERE month_key = ?',
+    ['2026-08'],
+  );
+  assert.equal(budgets.length, 1);
+  assert.equal(budgets[0].category_id, localId);
+  assert.equal(Number(budgets[0].amount_minor), 10_000);
+
+  const remoteCategory = await coordinator.query(
+    'SELECT count(*) AS n FROM categories WHERE id = ?',
+    [remoteId],
+  );
+  assert.equal(Number(remoteCategory[0].n), 0);
+});
+
+test('an alias to an archived category is ignored, then retargeted onto the new live label', async () => {
+  const {coordinator} = freshCoordinator('category-alias-archived');
+  const archivedId = await createCategory(coordinator, 'Food');
+  const remoteId = randomUUID();
+
+  await coordinator.execute({
+    commandId: randomUUID(),
+    kind: 'createCategory',
+    payload: {categoryId: remoteId, label: 'Food'},
+  });
+  await coordinator.execute({
+    commandId: randomUUID(),
+    kind: 'archiveCategory',
+    expectedRevision: 1,
+    payload: {categoryId: archivedId},
+  });
+
+  await assert.rejects(
+    coordinator.execute({
+      commandId: randomUUID(),
+      kind: 'setBudgetAmount',
+      expectedRevision: 0,
+      payload: {
+        monthKey: '2026-08',
+        categoryId: remoteId,
+        amountMinor: 10_000,
+      },
+    }),
+  );
+  const tombstone = await coordinator.query(
+    'SELECT count(*) AS n FROM budgets WHERE category_id = ?',
+    [archivedId],
+  );
+  assert.equal(Number(tombstone[0].n), 0, 'must not write a budget onto the archived row');
+
+  const liveId = await createCategory(coordinator, 'Food');
+  await coordinator.execute({
+    commandId: randomUUID(),
+    kind: 'setBudgetAmount',
+    expectedRevision: 0,
+    payload: {
+      monthKey: '2026-08',
+      categoryId: remoteId,
+      amountMinor: 10_000,
+    },
+  });
+
+  const [alias] = await coordinator.query(
+    'SELECT local_id FROM category_aliases WHERE remote_id = ?',
+    [remoteId],
+  );
+  assert.equal(alias.local_id, liveId);
+
+  const budgets = await coordinator.query(
+    'SELECT category_id, amount_minor FROM budgets WHERE month_key = ?',
+    ['2026-08'],
+  );
+  assert.equal(budgets.length, 1);
+  assert.equal(budgets[0].category_id, liveId);
+  assert.equal(Number(budgets[0].amount_minor), 10_000);
+});
+
+test('an id-match createCategory does not steal aliases of a different archived label', async () => {
+  const {coordinator} = freshCoordinator('category-alias-id-match');
+  const archivedFood = await createCategory(coordinator, 'Food');
+  const remoteFood = randomUUID();
+  await coordinator.execute({
+    commandId: randomUUID(),
+    kind: 'createCategory',
+    payload: {categoryId: remoteFood, label: 'Food'},
+  });
+  await coordinator.execute({
+    commandId: randomUUID(),
+    kind: 'archiveCategory',
+    expectedRevision: 1,
+    payload: {categoryId: archivedFood},
+  });
+
+  const travelId = await createCategory(coordinator, 'Travel');
+  await coordinator.execute({
+    commandId: randomUUID(),
+    kind: 'createCategory',
+    payload: {categoryId: travelId, label: 'Food'},
+  });
+
+  const [alias] = await coordinator.query(
+    'SELECT local_id FROM category_aliases WHERE remote_id = ?',
+    [remoteFood],
+  );
+  assert.equal(alias.local_id, archivedFood);
+  assert.notEqual(alias.local_id, travelId);
 });

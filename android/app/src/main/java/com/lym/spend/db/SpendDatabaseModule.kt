@@ -114,6 +114,19 @@ class SpendDatabaseModule(reactContext: ReactApplicationContext) :
   }
 
   @ReactMethod
+  fun retryRejectedOps(promise: Promise) {
+    executor.execute {
+      try {
+        promise.resolve(
+          SpendCoordinator.getInstance(reactApplicationContext).retryRejectedOps(),
+        )
+      } catch (error: Throwable) {
+        rejectCommandError(promise, error)
+      }
+    }
+  }
+
+  @ReactMethod
   fun getDeadLetterCount(promise: Promise) {
     executor.execute {
       try {

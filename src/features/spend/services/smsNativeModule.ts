@@ -18,18 +18,17 @@ export type SmsNativeInboxMessage = {
   type: number;
 };
 
+export type SmsInboxBackfillResult = {
+  attempted: number;
+  parsed: number;
+};
+
 type SpendSmsNativeModule = {
   getCapabilities(): Promise<SmsNativeCapabilities>;
   listInboxMessages(limit: number): Promise<SmsNativeInboxMessage[]>;
   listInboxMessagesSince(sinceTimestamp: number): Promise<SmsNativeInboxMessage[]>;
+  backfillInboxSince(sinceTimestamp: number): Promise<SmsInboxBackfillResult>;
   consumePendingRefreshFlag(): Promise<boolean>;
-  markIgnored(
-    dedupeKey: string,
-    amountMinor: number,
-    occurredAtMillis: number,
-    categoryLabel: string | null,
-  ): Promise<void>;
-  unmarkIgnored(dedupeKey: string): Promise<void>;
 };
 
 const nativeModule = NativeModules.SpendSmsModule as
@@ -74,25 +73,20 @@ export const listSpendSmsInboxMessagesSince = async (
   return nativeModule!.listInboxMessagesSince(sinceTimestamp);
 };
 
+export const backfillSpendSmsInboxSince = async (
+  sinceMillis: number,
+): Promise<SmsInboxBackfillResult> => {
+  if (!hasSpendSmsNativeModule()) {
+    return {attempted: 0, parsed: 0};
+  }
+
+  return nativeModule!.backfillInboxSince(sinceMillis);
+};
+
 export const consumePendingSmsRefreshFlag = async (): Promise<boolean> => {
   if (!hasSpendSmsNativeModule()) {
     return false;
   }
 
   return nativeModule!.consumePendingRefreshFlag();
-};
-
-export const markSpendIgnored = async (
-  dedupeKey: string,
-  amountMinor: number,
-  occurredAtMillis: number,
-  categoryLabel: string | null,
-): Promise<void> => {
-  if (!hasSpendSmsNativeModule()) return;
-  await nativeModule!.markIgnored(dedupeKey, amountMinor, occurredAtMillis, categoryLabel);
-};
-
-export const unmarkSpendIgnored = async (dedupeKey: string): Promise<void> => {
-  if (!hasSpendSmsNativeModule()) return;
-  await nativeModule!.unmarkIgnored(dedupeKey);
 };
