@@ -530,6 +530,30 @@ class SpendCoordinatorTest {
   }
 
   @Test
+  fun reingestingAnExistingTransactionSkipsWidgetSideEffects() = withFreshDatabase { coordinator ->
+    val input = SmsIngestInput(
+      sender = "KOTAKB",
+      body = "Sent Rs.48.00 from XXXXXX1234 to RAHUL SHARMA on 01/06/2026. UPI ref no. 651805890728.",
+      timestamp = 1_780_272_000_000L,
+      subscriptionId = 1,
+    )
+    SpendSmsIngestor.ingest(testContext(), coordinator, input)
+    SpendWidgetStorage.writeSnapshotJson(
+      testContext(),
+      """{"monthLabel":"SENTINEL","todayFormatted":"₹0","monthSpentMinor":0,"monthBudgetMinor":null,"daysRemainingInMonth":0,"topCategories":[],"todaySpends":[]}""",
+    )
+    assertEquals("SENTINEL", SpendWidgetStorage.readSnapshot(testContext()).monthLabel)
+
+    SpendSmsIngestor.ingest(testContext(), coordinator, input)
+
+    assertEquals(
+      1L,
+      coordinator.query("SELECT count(*) AS count FROM transactions").single()["count"],
+    )
+    assertEquals("SENTINEL", SpendWidgetStorage.readSnapshot(testContext()).monthLabel)
+  }
+
+  @Test
   fun nonTransactionMessageKeepsParseStatusForLaterReprocessing() = withFreshDatabase { coordinator ->
     SpendSmsIngestor.ingest(
       testContext(),

@@ -66,44 +66,18 @@ class SpendSmsModule(reactContext: ReactApplicationContext) :
     executor.execute {
       try {
         val coordinator = SpendCoordinator.getInstance(reactApplicationContext)
+        val inputs = readInboxForBackfill(sinceTimestamp)
         var attempted = 0
         var parsed = 0
-        queryInboxMessages(sinceTimestamp, 0, BACKFILL_PROJECTION)?.use { cursor ->
-          val addressIndex = cursor.getColumnIndex(Telephony.Sms.ADDRESS)
-          val bodyIndex = cursor.getColumnIndex(Telephony.Sms.BODY)
-          val dateIndex = cursor.getColumnIndex(Telephony.Sms.DATE)
-          val subscriptionIndex = cursor.getColumnIndex(Telephony.Sms.SUBSCRIPTION_ID)
-
-          while (cursor.moveToNext()) {
-            attempted += 1
-            val sender = if (addressIndex >= 0) cursor.getString(addressIndex) else null
-            val body = if (bodyIndex >= 0) cursor.getString(bodyIndex).orEmpty() else ""
-            val timestamp = if (dateIndex >= 0) cursor.getLong(dateIndex) else 0L
-            val subscriptionId =
-                if (subscriptionIndex >= 0 && !cursor.isNull(subscriptionIndex)) {
-                  cursor.getInt(subscriptionIndex)
-                } else {
-                  null
-                }
-            try {
-              val result =
-                  SpendSmsIngestor.ingest(
-                      reactApplicationContext,
-                      coordinator,
-                      SmsIngestInput(
-                          sender = sender,
-                          body = body,
-                          timestamp = timestamp,
-                          subscriptionId = subscriptionId,
-                          providerMessageId = null,
-                      ),
-                  )
-              if (result.parseResult.transaction != null) {
-                parsed += 1
-              }
-            } catch (error: Throwable) {
-              Log.e(LOG_TAG, "Could not ingest inbox SMS", error)
+        for (input in inputs) {
+          attempted += 1
+          try {
+            val result = SpendSmsIngestor.ingest(reactApplicationContext, coordinator, input)
+            if (result.parseResult.transaction != null) {
+              parsed += 1
             }
+          } catch (error: Throwable) {
+            Log.e(LOG_TAG, "Could not ingest inbox SMS", error)
           }
         }
 
@@ -191,6 +165,42 @@ class SpendSmsModule(reactContext: ReactApplicationContext) :
     promise.resolve(null)
   }
 
+  private fun readInboxForBackfill(sinceTimestamp: Double): List<SmsIngestInput> {
+    return queryInboxMessages(sinceTimestamp, 0, BACKFILL_PROJECTION)?.use { cursor ->
+      val addressIndex = cursor.getColumnIndex(Telephony.Sms.ADDRESS)
+      val bodyIndex = cursor.getColumnIndex(Telephony.Sms.BODY)
+      val dateIndex = cursor.getColumnIndex(Telephony.Sms.DATE)
+      val dateSentIndex = cursor.getColumnIndex(Telephony.Sms.DATE_SENT)
+      val subscriptionIndex = cursor.getColumnIndex(Telephony.Sms.SUBSCRIPTION_ID)
+      buildList {
+        while (cursor.moveToNext()) {
+          val dateReceived = if (dateIndex >= 0) cursor.getLong(dateIndex) else 0L
+          val dateSent =
+              if (dateSentIndex >= 0 && !cursor.isNull(dateSentIndex)) {
+                cursor.getLong(dateSentIndex)
+              } else {
+                0L
+              }
+          add(
+              SmsIngestInput(
+                  sender = if (addressIndex >= 0) cursor.getString(addressIndex) else null,
+                  body = if (bodyIndex >= 0) cursor.getString(bodyIndex).orEmpty() else "",
+                  // DATE_SENT is SmsMessage.timestampMillis; DATE is device receive time.
+                  timestamp = if (dateSent > 0L) dateSent else dateReceived,
+                  subscriptionId =
+                      if (subscriptionIndex >= 0 && !cursor.isNull(subscriptionIndex)) {
+                        cursor.getInt(subscriptionIndex)
+                      } else {
+                        null
+                      },
+                  providerMessageId = null,
+              ),
+          )
+        }
+      }
+    } ?: emptyList()
+  }
+
   private fun queryInboxMessages(
     sinceTimestamp: Double,
     limit: Int,
@@ -212,18 +222,37 @@ class SpendSmsModule(reactContext: ReactApplicationContext) :
           sortOrder,
       )
     } catch (error: IllegalArgumentException) {
-      // Some providers omit SUBSCRIPTION_ID; fall back so backfill can still run.
-      if (!projection.contains(Telephony.Sms.SUBSCRIPTION_ID)) {
-        throw error
-      }
-      reactApplicationContext.contentResolver.query(
-          Telephony.Sms.Inbox.CONTENT_URI,
-          projection.filter { it != Telephony.Sms.SUBSCRIPTION_ID }.toTypedArray(),
-          selection,
-          selectionArgs,
-          sortOrder,
-      )
+      // Some providers omit DATE_SENT or SUBSCRIPTION_ID; drop them one at a
+      // time so the remaining columns can still be read.
+      queryInboxDroppingOptionalColumns(projection, selection, selectionArgs, sortOrder, error)
     }
+  }
+
+  private fun queryInboxDroppingOptionalColumns(
+    projection: Array<String>,
+    selection: String?,
+    selectionArgs: Array<String>?,
+    sortOrder: String,
+    firstError: IllegalArgumentException,
+  ): Cursor? {
+    var remaining = projection.toList()
+    var lastError = firstError
+    for (column in OPTIONAL_INBOX_COLUMNS) {
+      if (column !in remaining) continue
+      remaining = remaining.filter { it != column }
+      try {
+        return reactApplicationContext.contentResolver.query(
+            Telephony.Sms.Inbox.CONTENT_URI,
+            remaining.toTypedArray(),
+            selection,
+            selectionArgs,
+            sortOrder,
+        )
+      } catch (retry: IllegalArgumentException) {
+        lastError = retry
+      }
+    }
+    throw lastError
   }
 
   private fun inboxSelection(sinceTimestamp: Double): Pair<String?, Array<String>?> {
@@ -280,8 +309,11 @@ class SpendSmsModule(reactContext: ReactApplicationContext) :
             Telephony.Sms.ADDRESS,
             Telephony.Sms.BODY,
             Telephony.Sms.DATE,
+            Telephony.Sms.DATE_SENT,
             Telephony.Sms.SUBSCRIPTION_ID,
         )
+    private val OPTIONAL_INBOX_COLUMNS =
+        listOf(Telephony.Sms.DATE_SENT, Telephony.Sms.SUBSCRIPTION_ID)
     private val INBOX_KEYWORD_TOKENS =
         listOf(
             "kotak",

@@ -46,23 +46,30 @@ object SpendSmsIngestor {
     coordinator.execute(Command.RecordSourceAlert("sms-record:${alert.id}", alert))
     val parsed = SpendSmsAutoParser.parse(context, input.sender, input.body, input.timestamp)
     if (parsed.transaction != null) {
-      coordinator.execute(createTransactionCommand(alert, input.timestamp, parsed.transaction))
-      // Publish only after the coordinator transaction commits. This keeps the
-      // common action path safe when the app process is not running later.
       val transactionId = stableUuid("sms-transaction:${alert.id}").toString()
-      // Keep the widget path entirely local and run it before Groq. A remote
-      // classification request can take several seconds, while BroadcastReceiver
-      // background execution is time-limited; the home-screen update must never
-      // sit behind network work or depend on that work succeeding.
-      SpendWidgetStorage.refreshFromDatabase(context.applicationContext, coordinator)
-      SpendWidgetProvider.refreshAllWidgets(context.applicationContext)
-      GroqTransactionClassifier.suggest(
-        context.applicationContext,
-        coordinator,
-        transactionId,
-        input.body,
-      )
-      SpendNotificationManager.publishForTransaction(context.applicationContext, coordinator, transactionId)
+      // Widget / Groq / notify must not run again for a row that is already stored.
+      val alreadyPresent = coordinator.query(
+        "SELECT id FROM transactions WHERE id = ?",
+        arrayOf(transactionId),
+      ).isNotEmpty()
+      coordinator.execute(createTransactionCommand(alert, input.timestamp, parsed.transaction))
+      if (!alreadyPresent) {
+        // Publish only after the coordinator transaction commits. This keeps the
+        // common action path safe when the app process is not running later.
+        // Keep the widget path entirely local and run it before Groq. A remote
+        // classification request can take several seconds, while BroadcastReceiver
+        // background execution is time-limited; the home-screen update must never
+        // sit behind network work or depend on that work succeeding.
+        SpendWidgetStorage.refreshFromDatabase(context.applicationContext, coordinator)
+        SpendWidgetProvider.refreshAllWidgets(context.applicationContext)
+        GroqTransactionClassifier.suggest(
+          context.applicationContext,
+          coordinator,
+          transactionId,
+          input.body,
+        )
+        SpendNotificationManager.publishForTransaction(context.applicationContext, coordinator, transactionId)
+      }
     } else {
       coordinator.execute(
         Command.UpdateAlertParseStatus(
