@@ -136,6 +136,8 @@ export type SpendSyncState = {
 
 export type SpendTransaction = {
   id: string;
+  /** Present when this row is one allocation of a (possibly split) payment. */
+  allocationId?: string;
   source: SpendSourceKind;
   sourceMessageId?: string;
   externalFingerprint?: string;

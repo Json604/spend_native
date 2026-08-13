@@ -156,7 +156,7 @@ export default function SpendDayTransactionsCard({
         <View style={styles.list}>
           {transactions.map((t) => (
             <Pressable
-              key={t.id}
+              key={t.allocationId ? `${t.id}:${t.allocationId}` : t.id}
               onPress={() => {
                 setEditingId(t.id);
                 setCustomLabel("");

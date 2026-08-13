@@ -6,6 +6,7 @@ import {
   writeSecureSession,
   type StoredAuthSession,
 } from "./secureTokenStore";
+import { isFatalRefreshStatus } from "./refreshPolicy";
 
 export const API_BASE_URL = "https://spend.kartikey.xyz";
 export const GOOGLE_WEB_CLIENT_ID = "913171475839-tse7c700rtj48d2a4ivarkahtp9u4oj4.apps.googleusercontent.com";
@@ -37,7 +38,9 @@ export function refreshAccessToken(): Promise<AuthSession | null> {
       body: JSON.stringify({ refresh: current.refresh }),
     });
     if (!response.ok) {
-      await clearSecureSession();
+      // Only a dead refresh token is a sign-out. 5xx / 429 / a blip must keep
+      // the stored pair so the next foreground can try again.
+      if (isFatalRefreshStatus(response.status)) await clearSecureSession();
       return null;
     }
     const next = (await response.json()) as RefreshResponse;
@@ -124,4 +127,5 @@ export async function signOut(): Promise<void> {
   }
 }
 
+export { isFatalRefreshStatus } from "./refreshPolicy";
 export { secureDeviceId };

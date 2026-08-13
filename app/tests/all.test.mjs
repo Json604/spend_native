@@ -8,3 +8,4 @@ await import('./syncClient.test.mjs');
 await import('./budgetPaste.test.mjs');
 await import('./smsPermissions.test.mjs');
 await import('./spendQueries.test.mjs');
+await import('./authRefresh.test.mjs');

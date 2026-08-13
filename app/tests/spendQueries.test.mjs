@@ -67,7 +67,7 @@ async function createTransaction(
   return id;
 }
 
-test('month and day spend sums use planned debits; lists keep one row per split', async () => {
+test('month and day spend sums use planned debits; split lists use slice amounts', async () => {
   const {coordinator} = freshCoordinator('spend-queries');
   const repository = new SqliteSpendRepository(coordinator);
 
@@ -125,18 +125,33 @@ test('month and day spend sums use planned debits; lists keep one row per split'
   assert.equal(dayBucket.transactionCount, 3);
 
   const dayList = await repository.transactionsForDay('2026-08-10');
-  assert.equal(dayList.length, 3);
+  assert.equal(dayList.length, 4);
   assert.deepEqual(
     new Set(dayList.map(transaction => transaction.id)),
     new Set([plannedId, unplannedId, splitId]),
+  );
+  const splitSlices = dayList.filter(transaction => transaction.id === splitId);
+  assert.equal(splitSlices.length, 2);
+  assert.deepEqual(
+    new Set(splitSlices.map(transaction => transaction.amountMinor)),
+    new Set([9_000, 6_000]),
+  );
+  assert.equal(
+    splitSlices.some(transaction => transaction.amountMinor === splitAmountMinor),
+    false,
+    'a split slice must not carry the full payment',
   );
   assert.ok(
     dayList.some(transaction => transaction.id === unplannedId && transaction.planType === 'unplanned'),
     'day list includes unplanned debits even though sums exclude them',
   );
 
+  const breakdown = await repository.categoryBreakdown('2026-08');
+  assert.equal(breakdown.find(row => row.categoryId === groceries)?.spentMinor, 9_000);
+  assert.equal(breakdown.find(row => row.categoryId === household)?.spentMinor, 6_000);
+
   const monthList = await repository.transactionsForMonth('2026-08');
-  assert.equal(monthList.filter(transaction => transaction.direction === 'debit').length, 3);
+  assert.equal(monthList.filter(transaction => transaction.direction === 'debit').length, 4);
 
   const review = await repository.needsReview('2026-08');
   assert.equal(review.length, 2);

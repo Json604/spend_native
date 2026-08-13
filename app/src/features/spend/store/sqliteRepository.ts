@@ -85,12 +85,14 @@ function mapTransaction(row: SqlRow): SpendTransaction {
   const allocationSource = row.allocation_source == null ? "uncategorized" : stringValue(row.allocation_source);
   const direction = stringValue(row.direction);
   const status = stringValue(row.status);
+  const allocationAmount = row.allocation_amount_minor;
   return {
     id: stringValue(row.id),
+    allocationId: row.allocation_id == null ? undefined : stringValue(row.allocation_id),
     source: transactionSource(stringValue(row.id)),
     sourceMessageId: row.provider_message_id == null ? undefined : stringValue(row.provider_message_id),
     occurredAt: new Date(numberValue(row.occurred_at)).toISOString(),
-    amountMinor: numberValue(row.amount_minor),
+    amountMinor: allocationAmount == null ? numberValue(row.amount_minor) : numberValue(allocationAmount),
     currencyCode: stringValue(row.currency_code),
     merchantName: stringValue(row.merchant_raw) || "Unknown payee",
     normalizedMerchantName: stringValue(row.counterparty_key || row.merchant_raw).toLowerCase(),
@@ -296,17 +298,17 @@ export class SqliteSpendRepository implements SpendDataRepository {
   async transactionsForDay(dateKey: string): Promise<SpendTransaction[]> {
     const monthKey = dateKey.slice(0, 7);
     const rows = await this.coordinator.query<SqlRow>(
-      `SELECT t.*, a.category_id, a.source AS allocation_source,
+      `SELECT t.*, a.id AS allocation_id, a.amount_minor AS allocation_amount_minor,
+              a.category_id, a.source AS allocation_source,
               c.label AS category_label, sa.provider_message_id, sa.raw_body
        FROM transactions t
-       LEFT JOIN transaction_allocations a ON a.id = (
-         SELECT MIN(a2.id) FROM transaction_allocations a2 WHERE a2.transaction_id = t.id)
+       LEFT JOIN transaction_allocations a ON a.transaction_id = t.id
        LEFT JOIN categories c ON c.id = a.category_id
        LEFT JOIN source_alerts sa ON sa.transaction_id = t.id
        WHERE t.accounting_month_key = ?
          AND strftime('%Y-%m-%d', t.occurred_at / 1000, 'unixepoch', '+5 hours', '+30 minutes') = ?
          AND t.direction = 'debit' AND t.status NOT IN ('ignored') AND t.deleted_at IS NULL
-       ORDER BY t.occurred_at DESC`,
+       ORDER BY t.occurred_at DESC, a.id`,
       [monthKey, dateKey],
     );
     return rows.map(mapTransaction);
@@ -356,15 +358,15 @@ export class SqliteSpendRepository implements SpendDataRepository {
 
   async transactionsForMonth(monthKey: string): Promise<SpendTransaction[]> {
     const rows = await this.coordinator.query<SqlRow>(
-      `SELECT t.*, a.category_id, a.source AS allocation_source,
+      `SELECT t.*, a.id AS allocation_id, a.amount_minor AS allocation_amount_minor,
+              a.category_id, a.source AS allocation_source,
               c.label AS category_label, sa.provider_message_id, sa.raw_body
        FROM transactions t
-       LEFT JOIN transaction_allocations a ON a.id = (
-         SELECT MIN(a2.id) FROM transaction_allocations a2 WHERE a2.transaction_id = t.id)
+       LEFT JOIN transaction_allocations a ON a.transaction_id = t.id
        LEFT JOIN categories c ON c.id = a.category_id
        LEFT JOIN source_alerts sa ON sa.transaction_id = t.id
        WHERE t.accounting_month_key = ? AND t.deleted_at IS NULL
-       ORDER BY t.occurred_at DESC`,
+       ORDER BY t.occurred_at DESC, a.id`,
       [monthKey],
     );
     return rows.map(mapTransaction);
