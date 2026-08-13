@@ -33,13 +33,11 @@ import {
 } from "./sqliteRepository";
 import { pushWidgetSnapshot } from "../services/widgetBridge";
 import {
-  convertSmsCandidatesToTransactions,
   getSmsPermissionState,
-  loadSmsIngestionSnapshot,
   requestSmsReadPermission,
   startOfTodayMillis,
 } from "../services/smsIngestion";
-import { consumePendingSmsRefreshFlag } from "../services/smsNativeModule";
+import { backfillSpendSmsInboxSince, consumePendingSmsRefreshFlag } from "../services/smsNativeModule";
 import { useAuth } from "../../../auth/AuthProvider";
 import { syncClient } from "../../../sync/syncClient";
 import { syncEngine } from "../../../sync/syncEngine";
@@ -418,18 +416,16 @@ export function SpendProvider({ children }: { children: ReactNode }) {
     isRefreshingSms.current = true;
     updateSyncState("sms", { status: "syncing", detail });
     try {
-      const snapshot = await loadSmsIngestionSnapshot({ sinceMillis: startOfTodayMillis() });
-      for (const transaction of convertSmsCandidatesToTransactions(snapshot.parsedCandidates)) {
-        await repository.createTransaction(transaction);
-      }
+      const permission = await getSmsPermissionState();
       // An ingest attempt reports what it INGESTED. Whether permission is
       // granted is the permission watcher's business — letting this path also
       // write "needs_permission" is what left the banner up after the user had
       // already said yes.
-      if (snapshot.permission === "granted") {
+      if (permission === "granted") {
+        const result = await backfillSpendSmsInboxSince(startOfTodayMillis());
         updateSyncState("sms", {
           status: "ready",
-          detail: snapshot.parsedCandidates.length ? `Today: ${snapshot.parsedCandidates.length} SMS transactions.` : "No transaction SMS found for today yet.",
+          detail: result.parsed ? `Today: ${result.parsed} SMS transactions.` : "No transaction SMS found for today yet.",
           lastSyncedAt: new Date(Date.now()).toISOString(),
         });
       }
@@ -439,7 +435,7 @@ export function SpendProvider({ children }: { children: ReactNode }) {
     } finally {
       isRefreshingSms.current = false;
     }
-  }, [repository, refreshAfterWrite, updateSyncState]);
+  }, [refreshAfterWrite, updateSyncState]);
 
   const refreshSmsInbox = useCallback(() => refreshSmsInboxToday("Scanning today's SMS for transaction alerts."), [refreshSmsInboxToday]);
   const grantSmsAccess = useCallback(async () => {

@@ -513,6 +513,23 @@ class SpendCoordinatorTest {
   }
 
   @Test
+  fun ingestingTheSameFingerprintTwiceWritesOneTransaction() = withFreshDatabase { coordinator ->
+    val input = SmsIngestInput(
+      sender = "KOTAKB",
+      body = "Sent Rs.48.00 from XXXXXX1234 to RAHUL SHARMA on 01/06/2026. UPI ref no. 651805890728.",
+      timestamp = 1_780_272_000_000L,
+      subscriptionId = 1,
+    )
+    SpendSmsIngestor.ingest(testContext(), coordinator, input)
+    SpendSmsIngestor.ingest(testContext(), coordinator, input)
+
+    assertEquals(
+      1L,
+      coordinator.query("SELECT count(*) AS count FROM transactions").single()["count"],
+    )
+  }
+
+  @Test
   fun nonTransactionMessageKeepsParseStatusForLaterReprocessing() = withFreshDatabase { coordinator ->
     SpendSmsIngestor.ingest(
       testContext(),

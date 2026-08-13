@@ -2,17 +2,23 @@ package com.lym.spend.sms
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.database.Cursor
 import android.provider.Telephony
+import android.util.Log
 import androidx.core.content.ContextCompat
+import com.lym.spend.db.SpendCoordinator
 import com.lym.spend.notification.SpendNotificationManager
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
+import java.util.concurrent.Executors
 
 class SpendSmsModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
+
+  private val executor = Executors.newSingleThreadExecutor()
 
   override fun getName(): String = MODULE_NAME
 
@@ -50,83 +56,79 @@ class SpendSmsModule(reactContext: ReactApplicationContext) :
     listInboxMessagesInternal(0, sinceTimestamp, promise)
   }
 
+  @ReactMethod
+  fun backfillInboxSince(sinceTimestamp: Double, promise: Promise) {
+    if (!hasReadSmsPermission()) {
+      promise.reject("E_SMS_PERMISSION", "READ_SMS permission is not granted.")
+      return
+    }
+
+    executor.execute {
+      try {
+        val coordinator = SpendCoordinator.getInstance(reactApplicationContext)
+        var attempted = 0
+        var parsed = 0
+        queryInboxMessages(sinceTimestamp, 0, BACKFILL_PROJECTION)?.use { cursor ->
+          val addressIndex = cursor.getColumnIndex(Telephony.Sms.ADDRESS)
+          val bodyIndex = cursor.getColumnIndex(Telephony.Sms.BODY)
+          val dateIndex = cursor.getColumnIndex(Telephony.Sms.DATE)
+          val subscriptionIndex = cursor.getColumnIndex(Telephony.Sms.SUBSCRIPTION_ID)
+
+          while (cursor.moveToNext()) {
+            attempted += 1
+            val sender = if (addressIndex >= 0) cursor.getString(addressIndex) else null
+            val body = if (bodyIndex >= 0) cursor.getString(bodyIndex).orEmpty() else ""
+            val timestamp = if (dateIndex >= 0) cursor.getLong(dateIndex) else 0L
+            val subscriptionId =
+                if (subscriptionIndex >= 0 && !cursor.isNull(subscriptionIndex)) {
+                  cursor.getInt(subscriptionIndex)
+                } else {
+                  null
+                }
+            try {
+              val result =
+                  SpendSmsIngestor.ingest(
+                      reactApplicationContext,
+                      coordinator,
+                      SmsIngestInput(
+                          sender = sender,
+                          body = body,
+                          timestamp = timestamp,
+                          subscriptionId = subscriptionId,
+                          providerMessageId = null,
+                      ),
+                  )
+              if (result.parseResult.transaction != null) {
+                parsed += 1
+              }
+            } catch (error: Throwable) {
+              Log.e(LOG_TAG, "Could not ingest inbox SMS", error)
+            }
+          }
+        }
+
+        promise.resolve(
+            Arguments.createMap().apply {
+              putInt("attempted", attempted)
+              putInt("parsed", parsed)
+            },
+        )
+      } catch (error: Exception) {
+        promise.reject("E_SMS_QUERY_FAILED", error.message, error)
+      }
+    }
+  }
+
   private fun listInboxMessagesInternal(limit: Int, sinceTimestamp: Double, promise: Promise) {
     if (!hasReadSmsPermission()) {
       promise.reject("E_SMS_PERMISSION", "READ_SMS permission is not granted.")
       return
     }
 
-    val resolver = reactApplicationContext.contentResolver
     val messages = Arguments.createArray()
-    val sortOrder =
-        if (limit > 0) {
-          "${Telephony.Sms.DEFAULT_SORT_ORDER} LIMIT ${limit.coerceAtMost(5000)}"
-        } else {
-          Telephony.Sms.DEFAULT_SORT_ORDER
-        }
 
     try {
-      // Filter hard at the source: returning thousands of full SMS bodies to JS can stall the bridge.
-      // This keeps the scan fast and focuses on transaction-like messages (Kotak/banks/UPI/card/txn keywords).
-      val selectionTokens = listOf(
-          "kotak",
-          "upi",
-          "card",
-          "debited",
-          "debit",
-          "spent",
-          "paid",
-          "purchase",
-          "txn",
-          "transaction",
-          "imps",
-          "neft",
-          "rtgs",
-          "pos",
-          "autopay",
-          "mandate",
-          "credited",
-          "credit",
-          "received",
-          "transfer",
-          "bank",
-      )
-      val selectionParts = ArrayList<String>()
-      val selectionArgs = ArrayList<String>()
-
-      selectionTokens.forEach { token ->
-        selectionParts.add("lower(${Telephony.Sms.ADDRESS}) LIKE ?")
-        selectionArgs.add("%$token%")
-        selectionParts.add("lower(${Telephony.Sms.BODY}) LIKE ?")
-        selectionArgs.add("%$token%")
-      }
-
-      val keywordSelection =
-          if (selectionParts.isEmpty()) null else "(${selectionParts.joinToString(" OR ")})"
-      val selection = if (sinceTimestamp > 0.0) {
-        val sinceClause = "${Telephony.Sms.DATE} >= ?"
-        selectionArgs.add(sinceTimestamp.toLong().toString())
-        if (keywordSelection != null) "$keywordSelection AND $sinceClause" else sinceClause
-      } else {
-        keywordSelection
-      }
-
-      val cursor =
-          resolver.query(
-              Telephony.Sms.Inbox.CONTENT_URI,
-              arrayOf(
-                  Telephony.Sms._ID,
-                  Telephony.Sms.ADDRESS,
-                  Telephony.Sms.BODY,
-                  Telephony.Sms.DATE,
-                  Telephony.Sms.TYPE,
-                  Telephony.Sms.THREAD_ID,
-                  Telephony.Sms.READ,
-              ),
-              selection,
-              if (selectionArgs.isEmpty()) null else selectionArgs.toTypedArray(),
-              sortOrder,
-          )
+      val cursor = queryInboxMessages(sinceTimestamp, limit, LIST_PROJECTION)
 
       cursor?.use {
         val idIndex = it.getColumnIndex(Telephony.Sms._ID)
@@ -189,6 +191,63 @@ class SpendSmsModule(reactContext: ReactApplicationContext) :
     promise.resolve(null)
   }
 
+  private fun queryInboxMessages(
+    sinceTimestamp: Double,
+    limit: Int,
+    projection: Array<String>,
+  ): Cursor? {
+    val (selection, selectionArgs) = inboxSelection(sinceTimestamp)
+    val sortOrder =
+        if (limit > 0) {
+          "${Telephony.Sms.DEFAULT_SORT_ORDER} LIMIT ${limit.coerceAtMost(5000)}"
+        } else {
+          Telephony.Sms.DEFAULT_SORT_ORDER
+        }
+    return try {
+      reactApplicationContext.contentResolver.query(
+          Telephony.Sms.Inbox.CONTENT_URI,
+          projection,
+          selection,
+          selectionArgs,
+          sortOrder,
+      )
+    } catch (error: IllegalArgumentException) {
+      // Some providers omit SUBSCRIPTION_ID; fall back so backfill can still run.
+      if (!projection.contains(Telephony.Sms.SUBSCRIPTION_ID)) {
+        throw error
+      }
+      reactApplicationContext.contentResolver.query(
+          Telephony.Sms.Inbox.CONTENT_URI,
+          projection.filter { it != Telephony.Sms.SUBSCRIPTION_ID }.toTypedArray(),
+          selection,
+          selectionArgs,
+          sortOrder,
+      )
+    }
+  }
+
+  private fun inboxSelection(sinceTimestamp: Double): Pair<String?, Array<String>?> {
+    val selectionParts = ArrayList<String>()
+    val selectionArgs = ArrayList<String>()
+    INBOX_KEYWORD_TOKENS.forEach { token ->
+      selectionParts.add("lower(${Telephony.Sms.ADDRESS}) LIKE ?")
+      selectionArgs.add("%$token%")
+      selectionParts.add("lower(${Telephony.Sms.BODY}) LIKE ?")
+      selectionArgs.add("%$token%")
+    }
+    val keywordSelection =
+        if (selectionParts.isEmpty()) null else "(${selectionParts.joinToString(" OR ")})"
+    val selection =
+        if (sinceTimestamp > 0.0) {
+          val sinceClause = "${Telephony.Sms.DATE} >= ?"
+          selectionArgs.add(sinceTimestamp.toLong().toString())
+          if (keywordSelection != null) "$keywordSelection AND $sinceClause" else sinceClause
+        } else {
+          keywordSelection
+        }
+    return selection to if (selectionArgs.isEmpty()) null else selectionArgs.toTypedArray()
+  }
+
   private fun hasReadSmsPermission(): Boolean {
     return ContextCompat.checkSelfPermission(
         reactApplicationContext,
@@ -205,5 +264,47 @@ class SpendSmsModule(reactContext: ReactApplicationContext) :
 
   companion object {
     const val MODULE_NAME = "SpendSmsModule"
+    private const val LOG_TAG = "SpendSmsModule"
+    private val LIST_PROJECTION =
+        arrayOf(
+            Telephony.Sms._ID,
+            Telephony.Sms.ADDRESS,
+            Telephony.Sms.BODY,
+            Telephony.Sms.DATE,
+            Telephony.Sms.TYPE,
+            Telephony.Sms.THREAD_ID,
+            Telephony.Sms.READ,
+        )
+    private val BACKFILL_PROJECTION =
+        arrayOf(
+            Telephony.Sms.ADDRESS,
+            Telephony.Sms.BODY,
+            Telephony.Sms.DATE,
+            Telephony.Sms.SUBSCRIPTION_ID,
+        )
+    private val INBOX_KEYWORD_TOKENS =
+        listOf(
+            "kotak",
+            "upi",
+            "card",
+            "debited",
+            "debit",
+            "spent",
+            "paid",
+            "purchase",
+            "txn",
+            "transaction",
+            "imps",
+            "neft",
+            "rtgs",
+            "pos",
+            "autopay",
+            "mandate",
+            "credited",
+            "credit",
+            "received",
+            "transfer",
+            "bank",
+        )
   }
 }

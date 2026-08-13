@@ -18,10 +18,16 @@ export type SmsNativeInboxMessage = {
   type: number;
 };
 
+export type SmsInboxBackfillResult = {
+  attempted: number;
+  parsed: number;
+};
+
 type SpendSmsNativeModule = {
   getCapabilities(): Promise<SmsNativeCapabilities>;
   listInboxMessages(limit: number): Promise<SmsNativeInboxMessage[]>;
   listInboxMessagesSince(sinceTimestamp: number): Promise<SmsNativeInboxMessage[]>;
+  backfillInboxSince(sinceTimestamp: number): Promise<SmsInboxBackfillResult>;
   consumePendingRefreshFlag(): Promise<boolean>;
   markIgnored(
     dedupeKey: string,
@@ -72,6 +78,16 @@ export const listSpendSmsInboxMessagesSince = async (
   }
 
   return nativeModule!.listInboxMessagesSince(sinceTimestamp);
+};
+
+export const backfillSpendSmsInboxSince = async (
+  sinceMillis: number,
+): Promise<SmsInboxBackfillResult> => {
+  if (!hasSpendSmsNativeModule()) {
+    return {attempted: 0, parsed: 0};
+  }
+
+  return nativeModule!.backfillInboxSince(sinceMillis);
 };
 
 export const consumePendingSmsRefreshFlag = async (): Promise<boolean> => {
