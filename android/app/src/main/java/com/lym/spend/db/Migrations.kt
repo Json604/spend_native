@@ -74,6 +74,12 @@ object Migrations {
            updated_at INTEGER NOT NULL
          )""",
     )
+    database.execSQL(
+      """CREATE TABLE IF NOT EXISTS category_aliases (
+           remote_id TEXT PRIMARY KEY,
+           local_id TEXT NOT NULL REFERENCES categories(id)
+         )""",
+    )
   }
 
   internal fun loadMigrationChain(context: Context): List<Migration> {

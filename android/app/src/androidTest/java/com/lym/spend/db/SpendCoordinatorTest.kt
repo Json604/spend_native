@@ -73,6 +73,50 @@ class SpendCoordinatorTest {
       listOf("command_id", "command_json", "error", "attempt_count", "created_at", "updated_at"),
       rejected.map { it["name"] },
     )
+    val aliases = coordinator.query("SELECT name FROM pragma_table_info('category_aliases')")
+    assertEquals(listOf("remote_id", "local_id"), aliases.map { it["name"] })
+  }
+
+  @Test
+  fun pulledCreateCategoryWithTheSameLabelAliasesOntoTheLiveLocalRow() = withFreshDatabase { coordinator ->
+    val localId = createCategory(coordinator, "Food")
+    val remoteId = UUID.randomUUID().toString()
+    coordinator.execute(
+      Command.CreateCategory(
+        UUID.randomUUID().toString(),
+        CreateCategoryPayload(remoteId, "Food"),
+      ),
+    )
+    coordinator.execute(
+      Command.SetBudgetAmount(
+        UUID.randomUUID().toString(),
+        expectedRevision = 0,
+        payload = SetBudgetAmountPayload(
+          monthKey = "2026-08",
+          categoryId = remoteId,
+          amountMinor = 10_000,
+        ),
+      ),
+    )
+
+    val alias = coordinator.query(
+      "SELECT remote_id, local_id FROM category_aliases WHERE remote_id = ?",
+      arrayOf(remoteId),
+    ).single()
+    assertEquals(remoteId, alias["remote_id"])
+    assertEquals(localId, alias["local_id"])
+
+    val budget = coordinator.query(
+      "SELECT category_id, amount_minor FROM budgets WHERE month_key = ?",
+      arrayOf("2026-08"),
+    ).single()
+    assertEquals(localId, budget["category_id"])
+    assertEquals(10_000L, budget["amount_minor"])
+
+    assertEquals(
+      0L,
+      coordinator.query("SELECT count(*) AS n FROM categories WHERE id = ?", arrayOf(remoteId)).single()["n"],
+    )
   }
 
   @Test

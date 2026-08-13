@@ -216,23 +216,27 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     }
   }
 
-  private fun dispatch(database: SQLiteDatabase, command: Command): CommandResult = when (command) {
-    is Command.CreateTransactionFromAlert -> createTransactionFromAlert(database, command)
-    is Command.RecordSourceAlert -> recordSourceAlert(database, command)
-    is Command.UpdateAlertParseStatus -> updateAlertParseStatus(database, command)
-    is Command.AssignCategory -> assignCategory(database, command)
-    is Command.SplitTransaction -> splitTransaction(database, command)
-    is Command.AcceptSuggestion -> acceptSuggestion(database, command)
-    is Command.SetBudgetAmount -> setBudgetAmount(database, command)
-    is Command.ClearMonthBudget -> clearMonthBudget(database, command)
-    is Command.CreateCategory -> createCategory(database, command)
-    is Command.RenameCategory -> renameCategory(database, command)
-    is Command.ArchiveCategory -> archiveCategory(database, command)
-    is Command.IgnoreTransaction -> ignoreTransaction(database, command)
-    is Command.SetPlanType -> setPlanType(database, command)
-    is Command.LinkRefund -> linkRefund(database, command)
-    is Command.RecordSuggestion -> recordSuggestion(database, command)
-    is Command.ResolvePossibleMatch -> resolvePossibleMatch(database, command)
+  private fun dispatch(database: SQLiteDatabase, command: Command): CommandResult {
+    // A never-aliased id is identity, so this is safe for local and pulled ops.
+    val resolved = resolveIncomingCategoryIds(database, command)
+    return when (resolved) {
+      is Command.CreateTransactionFromAlert -> createTransactionFromAlert(database, resolved)
+      is Command.RecordSourceAlert -> recordSourceAlert(database, resolved)
+      is Command.UpdateAlertParseStatus -> updateAlertParseStatus(database, resolved)
+      is Command.AssignCategory -> assignCategory(database, resolved)
+      is Command.SplitTransaction -> splitTransaction(database, resolved)
+      is Command.AcceptSuggestion -> acceptSuggestion(database, resolved)
+      is Command.SetBudgetAmount -> setBudgetAmount(database, resolved)
+      is Command.ClearMonthBudget -> clearMonthBudget(database, resolved)
+      is Command.CreateCategory -> createCategory(database, resolved)
+      is Command.RenameCategory -> renameCategory(database, resolved)
+      is Command.ArchiveCategory -> archiveCategory(database, resolved)
+      is Command.IgnoreTransaction -> ignoreTransaction(database, resolved)
+      is Command.SetPlanType -> setPlanType(database, resolved)
+      is Command.LinkRefund -> linkRefund(database, resolved)
+      is Command.RecordSuggestion -> recordSuggestion(database, resolved)
+      is Command.ResolvePossibleMatch -> resolvePossibleMatch(database, resolved)
+    }
   }
 
   private fun createTransactionFromAlert(
@@ -564,6 +568,15 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
 
     if (existingId != null) {
+      // A second device may have created the same label under a different id.
+      // Later pulled ops still carry that remote id; map it onto the live row
+      // so setBudgetAmount / allocations do not FK-fail.
+      if (payload.categoryId != existingId) {
+        database.execSQL(
+          "INSERT OR REPLACE INTO category_aliases (remote_id, local_id) VALUES (?, ?)",
+          arrayOf(payload.categoryId, existingId),
+        )
+      }
       // Idempotent no-op. Do NOT rewrite the existing row: the local one may
       // carry edits the incoming op predates.
       return applied(command, existingId, categoryRevision(database, existingId))
@@ -811,6 +824,57 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
   private fun categoryRevision(database: SQLiteDatabase, id: String): Int =
     scalarInt(database, "SELECT revision FROM categories WHERE id = ?", arrayOf(id))
       ?: throw RowNotFoundError(id)
+
+  private fun resolveCategoryId(database: SQLiteDatabase, id: String): String =
+    querySingle(
+      database,
+      "SELECT local_id FROM category_aliases WHERE remote_id = ?",
+      arrayOf(id),
+    ) { it.getString(0) } ?: id
+
+  private fun resolveIncomingCategoryIds(database: SQLiteDatabase, command: Command): Command =
+    when (command) {
+      is Command.AssignCategory -> command.copy(
+        payload = command.payload.copy(categoryId = resolveCategoryId(database, command.payload.categoryId)),
+      )
+      is Command.SplitTransaction -> command.copy(
+        payload = command.payload.copy(
+          allocations = command.payload.allocations.map { allocation ->
+            allocation.copy(categoryId = resolveCategoryId(database, allocation.categoryId))
+          },
+        ),
+      )
+      is Command.SetBudgetAmount -> command.copy(
+        payload = command.payload.copy(categoryId = resolveCategoryId(database, command.payload.categoryId)),
+      )
+      is Command.RecordSuggestion -> command.copy(
+        payload = command.payload.copy(categoryId = resolveCategoryId(database, command.payload.categoryId)),
+      )
+      is Command.CreateTransactionFromAlert -> {
+        val allocation = command.payload.allocation
+        val categoryId = allocation?.categoryId
+        if (categoryId == null) command
+        else command.copy(
+          payload = command.payload.copy(
+            allocation = allocation.copy(categoryId = resolveCategoryId(database, categoryId)),
+          ),
+        )
+      }
+      is Command.CreateCategory -> {
+        val parentId = command.payload.parentId
+        if (parentId == null) command
+        else command.copy(
+          payload = command.payload.copy(parentId = resolveCategoryId(database, parentId)),
+        )
+      }
+      is Command.ArchiveCategory -> command.copy(
+        payload = command.payload.copy(categoryId = resolveCategoryId(database, command.payload.categoryId)),
+      )
+      is Command.RenameCategory -> command.copy(
+        payload = command.payload.copy(categoryId = resolveCategoryId(database, command.payload.categoryId)),
+      )
+      else -> command
+    }
 
   private fun hasManualAllocation(database: SQLiteDatabase, transactionId: String): Boolean =
     scalarInt(

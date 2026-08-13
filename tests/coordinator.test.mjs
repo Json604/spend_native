@@ -446,7 +446,7 @@ test('an incomplete split rolls back and preserves the original allocation', asy
   assert.deepEqual(rows.map(row => ({...row})), [{category_id: null, amount_minor: 10_000}]);
 });
 
-test('version-1 databases migrate to 3 before serving queries', async () => {
+test('version-1 databases migrate to 4 before serving queries', async () => {
   const dbPath = newDatabasePath('migration-v1');
   const versionOne = new DatabaseSync(dbPath);
   versionOne.exec(readFileSync(new URL('../db/migrations/001_initial.sql', import.meta.url), 'utf8'));
@@ -460,8 +460,11 @@ test('version-1 databases migrate to 3 before serving queries', async () => {
   const rejectedColumns = await coordinator.query(
     "SELECT name FROM pragma_table_info('sync_rejected') ORDER BY cid",
   );
+  const aliasColumns = await coordinator.query(
+    "SELECT name FROM pragma_table_info('category_aliases') ORDER BY cid",
+  );
 
-  assert.equal(version.user_version, 3);
+  assert.equal(version.user_version, 4);
   assert.deepEqual(
     commandLogColumns.map(column => column.name),
     ['command_id', 'kind', 'result_json', 'created_at'],
@@ -470,9 +473,13 @@ test('version-1 databases migrate to 3 before serving queries', async () => {
     rejectedColumns.map(column => column.name),
     ['command_id', 'command_json', 'error', 'attempt_count', 'created_at', 'updated_at'],
   );
+  assert.deepEqual(
+    aliasColumns.map(column => column.name),
+    ['remote_id', 'local_id'],
+  );
 });
 
-test('a version-2 database that already has sync_rejected still migrates to 3', async () => {
+test('a version-2 database that already has sync_rejected still migrates to 4', async () => {
   const dbPath = newDatabasePath('migration-v2-ensure');
   const versionTwo = new DatabaseSync(dbPath);
   versionTwo.exec(readFileSync(new URL('../db/migrations/001_initial.sql', import.meta.url), 'utf8'));
@@ -496,7 +503,7 @@ test('a version-2 database that already has sync_rejected still migrates to 3', 
     "SELECT count(*) AS n FROM processed_commands WHERE kind = 'rejected'",
   );
 
-  assert.equal(version.user_version, 3);
+  assert.equal(version.user_version, 4);
   assert.equal(Number(leftover[0].n), 0);
 });
 
@@ -508,7 +515,7 @@ test('a database from a future schema version is refused, never reset', () => {
 
   assert.throws(
     () => createNodeCoordinator(dbPath),
-    /user_version 99 is newer than supported version 3/,
+    /user_version 99 is newer than supported version 4/,
   );
 
   const unchanged = new DatabaseSync(dbPath);
@@ -552,4 +559,49 @@ test('replaying a transaction creation under a new command id is a no-op', async
   assert.equal(allocations.length, 1);
   assert.equal(allocations[0].category_id, category);
   assert.equal(allocations[0].source, 'manual');
+});
+
+test('a pulled createCategory with the same label aliases onto the live local row', async () => {
+  const {coordinator} = freshCoordinator('category-alias');
+  const localId = await createCategory(coordinator, 'Food');
+  const remoteId = randomUUID();
+
+  await coordinator.execute({
+    commandId: randomUUID(),
+    kind: 'createCategory',
+    payload: {categoryId: remoteId, label: 'Food'},
+  });
+
+  await coordinator.execute({
+    commandId: randomUUID(),
+    kind: 'setBudgetAmount',
+    expectedRevision: 0,
+    payload: {
+      monthKey: '2026-08',
+      categoryId: remoteId,
+      amountMinor: 10_000,
+    },
+  });
+
+  const aliases = await coordinator.query(
+    'SELECT remote_id, local_id FROM category_aliases WHERE remote_id = ?',
+    [remoteId],
+  );
+  assert.equal(aliases.length, 1);
+  assert.equal(aliases[0].remote_id, remoteId);
+  assert.equal(aliases[0].local_id, localId);
+
+  const budgets = await coordinator.query(
+    'SELECT category_id, amount_minor FROM budgets WHERE month_key = ?',
+    ['2026-08'],
+  );
+  assert.equal(budgets.length, 1);
+  assert.equal(budgets[0].category_id, localId);
+  assert.equal(Number(budgets[0].amount_minor), 10_000);
+
+  const remoteCategory = await coordinator.query(
+    'SELECT count(*) AS n FROM categories WHERE id = ?',
+    [remoteId],
+  );
+  assert.equal(Number(remoteCategory[0].n), 0);
 });
