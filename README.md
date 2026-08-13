@@ -1,12 +1,30 @@
 # Spend
 
-One repo: the Android app and the sync server.
-
 | Path | What |
 |---|---|
-| `/` | React Native Android app (`npm start`, `npx react-native run-android`) |
+| `app/` | React Native Android app |
 | `server/` | Fastify + Postgres API (`https://spend.kartikey.xyz`) |
 
-App talks to the server over HTTPS for Google sign-in, sync, and SMS classification. The phone still owns the SQLite ledger.
+The phone owns the SQLite ledger. The server is sign-in, sync, and SMS classification.
 
-Server local checks: `cd server && npm install && npm test`. Deploy: `cd server && docker compose up -d --build`. Do not commit `server/.env`.
+## App
+
+```sh
+cd app
+npm start
+npx react-native run-android
+cd tests && node --test coordinator.test.mjs spendQueries.test.mjs backupOps.test.mjs syncClient.test.mjs wireCommands.test.mjs
+```
+
+Release: `app/scripts/release.sh <version> [notes]`
+
+## Server
+
+```sh
+cd server
+npm install
+npm test
+# deploy
+cp .env.example .env   # never commit
+docker compose up -d --build
+```
