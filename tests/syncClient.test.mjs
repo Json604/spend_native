@@ -75,6 +75,97 @@ test('retryRejectedOps runs before pull and leftover rejects become report.error
   assert.match(report.error ?? '', /2 changes from the server could not be applied/);
 });
 
+test('backUpEverything sends createTransactionFromAlert ops after categories and before budgets', async () => {
+  const pushed = [];
+  const nativeCoordinator = {
+    query: async sql => {
+      if (sql.includes("key = 'owner_id'")) return [{value: 'user-1'}];
+      if (sql.includes('FROM categories')) {
+        return [{id: 'cat-1', label: 'Food', tint: null, parent_id: null, is_system: 0, catalog_version: 1}];
+      }
+      if (sql.includes('FROM transactions')) {
+        return [{
+          id: 'tx-1',
+          occurred_at: 1,
+          received_at: 2,
+          accounting_month_key: '2026-08',
+          amount_minor: 4200,
+          direction: 'debit',
+          currency_code: 'INR',
+          merchant_raw: 'Cafe',
+          counterparty_key: 'cafe',
+          channel: 'upi',
+          status: 'posted',
+          plan_type: 'unplanned',
+        }];
+      }
+      if (sql.includes('FROM source_alerts')) {
+        return [{
+          id: 'alert-1',
+          transaction_id: 'tx-1',
+          raw_sender: 'BANK',
+          raw_body: 'paid 42',
+          received_at: 2,
+          provider_message_id: 'm-1',
+          subscription_id: null,
+          bank_reference: null,
+          parse_status: 'parsed',
+        }];
+      }
+      if (sql.includes('FROM transaction_allocations')) {
+        return [{
+          id: 'alloc-1',
+          transaction_id: 'tx-1',
+          category_id: 'cat-1',
+          amount_minor: 4200,
+          source: 'manual',
+          confidence: 1,
+        }];
+      }
+      if (sql.includes('FROM budgets')) {
+        return [{month_key: '2026-08', category_id: 'cat-1', amount_minor: 500, recurring: 0}];
+      }
+      return [];
+    },
+  };
+  const client = new SpendSyncClient({
+    nativeSync: {
+      acknowledgeOutbox: async () => 0,
+      recordOutboxFailure: async () => 0,
+      recoverDeadLettersOnce: async () => 0,
+      applyPulledOps: async () => '{"applied":[],"rejected":[]}',
+      retryRejectedOps: async () => '{"retried":0}',
+      getDeadLetterCount: async () => 0,
+    },
+    nativeCoordinator,
+    authenticatedFetch: async (path, init) => {
+      if (path === '/v1/sync/push') pushed.push(JSON.parse(init.body));
+      return jsonResponse({applied: [], conflicts: []});
+    },
+    secureDeviceId: async () => 'device-1',
+  });
+
+  const report = await client.backUpEverything();
+  assert.equal(report.error, undefined);
+  assert.equal(report.sent, 3);
+  assert.deepEqual(pushed.map(body => body.ops.map(op => op.entity)), [
+    ['categories'],
+    ['transactions'],
+    ['budgets'],
+  ]);
+  const transaction = pushed[1].ops[0];
+  assert.equal(transaction.kind, 'createTransactionFromAlert');
+  assert.equal(transaction.payload.transaction.planType, 'unplanned');
+  assert.equal(transaction.payload.alert.id, 'alert-1');
+  assert.deepEqual(transaction.payload.allocation, {
+    id: 'alloc-1',
+    categoryId: 'cat-1',
+    source: 'manual',
+    confidence: 1,
+  });
+  assert.equal(transaction.expectedRevision, undefined);
+});
+
 test('an apply-report reject is an error even when leftover COUNT is zero', async () => {
   const {client} = stubbedClient({
     leftover: 0,

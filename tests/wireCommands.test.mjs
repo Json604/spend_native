@@ -61,6 +61,57 @@ test('an op that already carries a kind is still translated by the original path
   assert.equal(command.expectedRevision, undefined);
 });
 
+test('a kind-less transaction upsert with alert and transaction becomes createTransactionFromAlert', () => {
+  const command = normalizeRemoteCommand({
+    entity_type: 'transactions',
+    action: 'upsert',
+    op_id: '33333333-3333-4333-8333-333333333333',
+    entity_id: 'sms:8393',
+    payload: {
+      fields: {
+        alert: {id: 'sms:8393:alert', receivedAt: 1, parseStatus: 'parsed'},
+        transaction: {
+          id: 'sms:8393',
+          occurredAt: 1,
+          receivedAt: 1,
+          accountingMonthKey: '2026-08',
+          amountMinor: 4200,
+          direction: 'debit',
+        },
+      },
+    },
+  });
+  assert.equal(command.kind, 'createTransactionFromAlert');
+  assert.equal(command.commandId, '33333333-3333-4333-8333-333333333333');
+  assert.equal(command.payload.alert.id, 'sms:8393:alert');
+  assert.equal(command.payload.transaction.id, 'sms:8393');
+  assert.equal(command.payload.transaction.amountMinor, 4200);
+  assert.equal(command.expectedRevision, undefined);
+});
+
+test('an unrecognised transaction shape is left with kind undefined', () => {
+  const command = normalizeRemoteCommand(
+    pulled('transactions', 'upsert', {transactionId: 'sms:8393', amountMinor: 42}, 'sms:8393'));
+  assert.equal(command.kind, undefined);
+});
+
+test('a kind-less split upsert becomes splitTransaction and ignore requires an ignore signal', () => {
+  const split = normalizeRemoteCommand(pulled('transactions', 'upsert', {
+    transactionId: 'sms:8393',
+    allocations: [{categoryId: 'custom:food', amountMinor: 10, allocationId: 'a-1'}],
+  }, 'sms:8393'));
+  assert.equal(split.kind, 'splitTransaction');
+  assert.equal(split.payload.transactionId, 'sms:8393');
+  assert.equal(split.expectedRevision, undefined);
+
+  const ignored = normalizeRemoteCommand(pulled('transactions', 'upsert', {
+    transactionId: 'sms:8393',
+    status: 'ignored',
+  }, 'sms:8393'));
+  assert.equal(ignored.kind, 'ignoreTransaction');
+  assert.deepEqual(ignored.payload, {transactionId: 'sms:8393'});
+});
+
 test('an unrecognised entity is left alone rather than guessed at', () => {
   const command = normalizeRemoteCommand(pulled('suggestions', 'upsert', {suggestionId: 's-1'}, 's-1'));
   assert.equal(command.kind, undefined);

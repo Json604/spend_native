@@ -1,3 +1,4 @@
+import { deterministicOpId, transactionToBackupOps } from "./backupOps.ts";
 import { nextPullCursor, normalizeRemoteCommand, parsePayload, wireOperationId, type SyncOperation } from "./wireCommands.ts";
 
 const BATCH_SIZE = 50;
@@ -122,51 +123,112 @@ export class SpendSyncClient {
     if (!sessionRows[0]?.value) return { sent: 0, error: "Sign in first" };
     const deviceId = await this.deps.secureDeviceId();
 
-    const sources: { entity: string; sql: string; toFields: (row: Record<string, unknown>) => Record<string, unknown> }[] = [
-      {
+    let sent = 0;
+    try {
+      // Categories first so a restored device can apply allocations that
+      // reference them. Transactions replay next. Budgets come last.
+      sent += await this.pushBatches(await this.fieldBackupOps({
         entity: "categories",
         sql: "SELECT id, label, tint, parent_id, is_system, catalog_version FROM categories WHERE deleted_at IS NULL",
         toFields: (row) => ({
           categoryId: row.id, label: row.label, tint: row.tint,
           parentId: row.parent_id, isSystem: !!row.is_system, catalogVersion: row.catalog_version,
         }),
-      },
-      {
+      }), deviceId);
+      sent += await this.pushBatches(await this.transactionBackupOps(), deviceId);
+      sent += await this.pushBatches(await this.fieldBackupOps({
         entity: "budgets",
         sql: "SELECT month_key, category_id, amount_minor, recurring FROM budgets",
         toFields: (row) => ({
           monthKey: row.month_key, categoryId: row.category_id,
           amountMinor: row.amount_minor, recurring: !!row.recurring,
         }),
-      },
-    ];
-
-    let sent = 0;
-    try {
-      for (const source of sources) {
-        const rows = await this.deps.nativeCoordinator.query<Record<string, unknown>>(source.sql);
-        for (let index = 0; index < rows.length; index += BATCH_SIZE) {
-          const slice = rows.slice(index, index + BATCH_SIZE);
-          const operations = slice.map((row) => {
-            const entityId = source.entity === "budgets"
-              ? `${String(row.month_key)}:${String(row.category_id)}`
-              : String(row.id);
-            return {
-              opId: deterministicOpId(source.entity, entityId),
-              entity: source.entity,
-              entityId,
-              action: "upsert" as const,
-              fields: source.toFields(row),
-            };
-          });
-          await this.push(operations, deviceId);
-          sent += operations.length;
-        }
-      }
+      }), deviceId);
       return { sent };
     } catch (error) {
       return { sent, error: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  private async fieldBackupOps(source: {
+    entity: string;
+    sql: string;
+    toFields: (row: Record<string, unknown>) => Record<string, unknown>;
+  }): Promise<SyncOperation[]> {
+    const rows = await this.deps.nativeCoordinator.query<Record<string, unknown>>(source.sql);
+    return rows.map((row) => {
+      const entityId = source.entity === "budgets"
+        ? `${String(row.month_key)}:${String(row.category_id)}`
+        : String(row.id);
+      return {
+        opId: deterministicOpId(source.entity, entityId),
+        entity: source.entity,
+        entityId,
+        action: "upsert" as const,
+        fields: source.toFields(row),
+      };
+    });
+  }
+
+  private async transactionBackupOps(): Promise<SyncOperation[]> {
+    const [transactions, alerts, allocations] = await Promise.all([
+      this.deps.nativeCoordinator.query<Record<string, unknown>>(
+        `SELECT id, occurred_at, received_at, accounting_month_key, amount_minor,
+                direction, currency_code, merchant_raw, counterparty_key, channel,
+                status, plan_type
+           FROM transactions
+          WHERE deleted_at IS NULL
+          ORDER BY id`,
+      ),
+      this.deps.nativeCoordinator.query<Record<string, unknown>>(
+        `SELECT id, transaction_id, raw_sender, raw_body, received_at,
+                provider_message_id, subscription_id, bank_reference, parse_status
+           FROM source_alerts
+          WHERE transaction_id IS NOT NULL
+          ORDER BY id`,
+      ),
+      this.deps.nativeCoordinator.query<Record<string, unknown>>(
+        `SELECT id, transaction_id, category_id, amount_minor, source, confidence
+           FROM transaction_allocations
+          ORDER BY id`,
+      ),
+    ]);
+
+    const alertByTransaction = new Map<string, Record<string, unknown>>();
+    for (const alert of alerts) {
+      const transactionId = typeof alert.transaction_id === "string" ? alert.transaction_id : "";
+      if (!transactionId || alertByTransaction.has(transactionId)) continue;
+      alertByTransaction.set(transactionId, alert);
+    }
+
+    const allocationsByTransaction = new Map<string, Record<string, unknown>[]>();
+    for (const allocation of allocations) {
+      const transactionId = typeof allocation.transaction_id === "string" ? allocation.transaction_id : "";
+      if (!transactionId) continue;
+      const list = allocationsByTransaction.get(transactionId);
+      if (list) list.push(allocation);
+      else allocationsByTransaction.set(transactionId, [allocation]);
+    }
+
+    return transactions.flatMap((transaction) => {
+      const id = String(transaction.id);
+      return transactionToBackupOps({
+        ...transaction,
+        id,
+        alert: alertByTransaction.get(id) ?? null,
+        allocations: allocationsByTransaction.get(id) ?? [],
+      });
+    });
+  }
+
+  private async pushBatches(operations: SyncOperation[], deviceId: string): Promise<number> {
+    let sent = 0;
+    for (let index = 0; index < operations.length; index += BATCH_SIZE) {
+      const slice = operations.slice(index, index + BATCH_SIZE);
+      await this.push(slice, deviceId);
+      sent += slice.length;
+    }
+    return sent;
   }
 
   private async drainOutbox(deviceId: string): Promise<number> {
@@ -258,29 +320,6 @@ export class SpendSyncClient {
     const stored = rows[0]?.value;
     return stored && stored !== "" ? stored : "0";
   }
-}
-
-/**
- * A UUID derived from the entity id, so re-running a full backup produces the
- * SAME op ids and the server's idempotency collapses repeats into no-ops.
- */
-function deterministicOpId(entity: string, entityId: string): string {
-  let h1 = 0x811c9dc5;
-  let h2 = 0x01000193;
-  const input = `${entity}:${entityId}`;
-  for (let index = 0; index < input.length; index += 1) {
-    h1 = Math.imul(h1 ^ input.charCodeAt(index), 16777619) >>> 0;
-    h2 = Math.imul(h2 + input.charCodeAt(index), 2246822519) >>> 0;
-  }
-  const hex = (value: number) => value.toString(16).padStart(8, "0");
-  const raw = `${hex(h1)}${hex(h2)}${hex(h1 ^ h2)}${hex((h1 + h2) >>> 0)}`;
-  return [
-    raw.slice(0, 8),
-    raw.slice(8, 12),
-    `5${raw.slice(13, 16)}`,
-    `${"89ab"[h1 & 3]}${raw.slice(17, 20)}`,
-    raw.slice(20, 32),
-  ].join("-");
 }
 
 /** Parses applyPulledOps JSON. Older builds returned an array and count as zero. */
