@@ -64,6 +64,16 @@ object Migrations {
       """CREATE INDEX IF NOT EXISTS outbox_ready_created_at_idx
          ON outbox (dead_lettered, next_attempt_at, created_at)""",
     )
+    database.execSQL(
+      """CREATE TABLE IF NOT EXISTS sync_rejected (
+           command_id TEXT PRIMARY KEY,
+           command_json TEXT NOT NULL,
+           error TEXT NOT NULL,
+           attempt_count INTEGER NOT NULL DEFAULT 1,
+           created_at INTEGER NOT NULL,
+           updated_at INTEGER NOT NULL
+         )""",
+    )
   }
 
   internal fun loadMigrationChain(context: Context): List<Migration> {

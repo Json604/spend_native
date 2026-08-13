@@ -202,9 +202,9 @@ export class SpendSyncClient {
   }
 
   private async pull(userId: string): Promise<number> {
+    await nativeSync.retryRejectedOps();
     let cursor = await this.cursor();
     let total = 0;
-    let rejected = 0;
     for (let page = 0; page < 20; page += 1) {
       const response = await authenticatedFetch(`/v1/sync/pull?since=${encodeURIComponent(cursor)}`);
       if (!response.ok) throw new Error(`Sync pull failed (${response.status})`);
@@ -214,18 +214,21 @@ export class SpendSyncClient {
       const commands = ops.map(normalizeRemoteCommand).map((command) => JSON.stringify(command));
       const applyReport = await nativeSync.applyPulledOps(JSON.stringify(commands), nextCursor, userId);
       // A rejected op is data the server has and this device does not. It is
-      // skipped so one bad op cannot wedge sync forever, but it must never pass
-      // as success — an incomplete copy that reports "up to date" is the failure
-      // mode this whole sync path has been bitten by repeatedly.
-      rejected += countRejected(applyReport);
+      // stored for retry so one bad op cannot wedge later pages, but it must
+      // never pass as success — an incomplete copy that reports "up to date"
+      // is the failure mode this whole sync path has been bitten by repeatedly.
+      countRejected(applyReport);
       total += ops.length;
-      if (ops.length === 0 || nextCursor === cursor) {
-        if (rejected > 0) throw new Error(`${rejected} change${rejected === 1 ? "" : "s"} from the server could not be applied`);
-        return total;
-      }
+      if (ops.length === 0 || nextCursor === cursor) break;
       cursor = nextCursor;
     }
-    if (rejected > 0) throw new Error(`${rejected} change${rejected === 1 ? "" : "s"} from the server could not be applied`);
+    const leftoverRows = await nativeCoordinator.query<{ count: number | string }>(
+      "SELECT COUNT(*) AS count FROM sync_rejected",
+    );
+    const leftover = Number(leftoverRows[0]?.count ?? 0);
+    if (leftover > 0) {
+      throw new Error(`${leftover} change${leftover === 1 ? "" : "s"} from the server could not be applied`);
+    }
     return total;
   }
 

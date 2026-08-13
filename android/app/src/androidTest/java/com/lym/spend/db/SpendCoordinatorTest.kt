@@ -16,6 +16,8 @@ import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -63,9 +65,14 @@ class SpendCoordinatorTest {
     val newestVersion = Migrations.loadMigrationChain(testContext()).last().version
     val version = coordinator.query("PRAGMA user_version").single()["user_version"]
     val commandLog = coordinator.query("SELECT name FROM pragma_table_info('processed_commands')")
+    val rejected = coordinator.query("SELECT name FROM pragma_table_info('sync_rejected')")
 
     assertEquals(newestVersion.toLong(), version)
     assertEquals(listOf("command_id", "kind", "result_json", "created_at"), commandLog.map { it["name"] })
+    assertEquals(
+      listOf("command_id", "command_json", "error", "attempt_count", "created_at", "updated_at"),
+      rejected.map { it["name"] },
+    )
   }
 
   @Test
@@ -570,6 +577,80 @@ class SpendCoordinatorTest {
     val alert = coordinator.query("SELECT parse_status FROM source_alerts").single()
     assertEquals("unknown_classification", alert["parse_status"])
     assertEquals(0L, coordinator.query("SELECT count(*) AS count FROM transactions").single()["count"])
+  }
+
+  @Test
+  fun pulledBatchAppliesSuccessesStoresRejectsAndAdvancesCursor() = withFreshDatabase { coordinator ->
+    val userId = "user-1"
+    coordinator.claimLocalData(userId, "device-1")
+    val categoryId = UUID.randomUUID().toString()
+    val good = Command.CreateCategory(
+      UUID.randomUUID().toString(),
+      CreateCategoryPayload(categoryId, "Food"),
+    )
+    val badId = UUID.randomUUID().toString()
+    val badJson = JSONObject()
+      .put("commandId", badId)
+      .put("kind", "notACommand")
+      .put("payload", JSONObject())
+      .toString()
+    val commandsJson = JSONArray()
+      .put(good.toJson().toString())
+      .put(badJson)
+      .toString()
+
+    coordinator.applyPulledOps(commandsJson, "cursor-after-page", userId)
+
+    val state = coordinator.query(
+      """SELECT
+           (SELECT count(*) FROM categories WHERE id = ?) categories,
+           (SELECT count(*) FROM processed_commands WHERE command_id = ?) good_processed,
+           (SELECT count(*) FROM processed_commands WHERE command_id = ?) bad_processed,
+           (SELECT count(*) FROM sync_rejected WHERE command_id = ?) rejected,
+           (SELECT command_json FROM sync_rejected WHERE command_id = ?) rejected_json,
+           (SELECT value FROM sync_metadata WHERE key = 'pull_cursor') cursor""",
+      arrayOf(categoryId, good.commandId, badId, badId, badId),
+    ).single()
+    assertEquals(1L, state["categories"])
+    assertEquals(1L, state["good_processed"])
+    assertEquals(0L, state["bad_processed"])
+    assertEquals(1L, state["rejected"])
+    assertEquals(badJson, state["rejected_json"])
+    assertEquals("cursor-after-page", state["cursor"])
+  }
+
+  @Test
+  fun retryRejectedOpsAppliesANowValidCommandAndClearsTheRow() = withFreshDatabase { coordinator ->
+    val categoryId = UUID.randomUUID().toString()
+    val command = Command.CreateCategory(
+      UUID.randomUUID().toString(),
+      CreateCategoryPayload(categoryId, "Travel"),
+    )
+    val now = System.currentTimeMillis()
+    writableDatabase(coordinator).execSQL(
+      """INSERT INTO sync_rejected (
+           command_id, command_json, error, attempt_count, created_at, updated_at
+         ) VALUES (?, ?, ?, 1, ?, ?)""",
+      arrayOf(command.commandId, command.toJson().toString(), "previous failure", now, now),
+    )
+
+    val report = JSONObject(coordinator.retryRejectedOps())
+    val state = coordinator.query(
+      """SELECT
+           (SELECT count(*) FROM categories WHERE id = ?) categories,
+           (SELECT count(*) FROM processed_commands WHERE command_id = ?) processed,
+           (SELECT count(*) FROM sync_rejected WHERE command_id = ?) rejected,
+           (SELECT count(*) FROM outbox WHERE id = ?) outbox""",
+      arrayOf(categoryId, command.commandId, command.commandId, command.commandId),
+    ).single()
+
+    assertEquals(1, report.getInt("retried"))
+    assertEquals(1, report.getInt("applied"))
+    assertEquals(0, report.getInt("rejected"))
+    assertEquals(1L, state["categories"])
+    assertEquals(1L, state["processed"])
+    assertEquals(0L, state["rejected"])
+    assertEquals(0L, state["outbox"])
   }
 
   private fun testContext(): Context = InstrumentationRegistry.getInstrumentation().targetContext

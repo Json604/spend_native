@@ -446,7 +446,7 @@ test('an incomplete split rolls back and preserves the original allocation', asy
   assert.deepEqual(rows.map(row => ({...row})), [{category_id: null, amount_minor: 10_000}]);
 });
 
-test('version-1 databases migrate to 2 before serving queries', async () => {
+test('version-1 databases migrate to 3 before serving queries', async () => {
   const dbPath = newDatabasePath('migration-v1');
   const versionOne = new DatabaseSync(dbPath);
   versionOne.exec(readFileSync(new URL('../db/migrations/001_initial.sql', import.meta.url), 'utf8'));
@@ -457,11 +457,18 @@ test('version-1 databases migrate to 2 before serving queries', async () => {
   const commandLogColumns = await coordinator.query(
     "SELECT name FROM pragma_table_info('processed_commands') ORDER BY cid",
   );
+  const rejectedColumns = await coordinator.query(
+    "SELECT name FROM pragma_table_info('sync_rejected') ORDER BY cid",
+  );
 
-  assert.equal(version.user_version, 2);
+  assert.equal(version.user_version, 3);
   assert.deepEqual(
     commandLogColumns.map(column => column.name),
     ['command_id', 'kind', 'result_json', 'created_at'],
+  );
+  assert.deepEqual(
+    rejectedColumns.map(column => column.name),
+    ['command_id', 'command_json', 'error', 'attempt_count', 'created_at', 'updated_at'],
   );
 });
 
@@ -473,7 +480,7 @@ test('a database from a future schema version is refused, never reset', () => {
 
   assert.throws(
     () => createNodeCoordinator(dbPath),
-    /user_version 99 is newer than supported version 2/,
+    /user_version 99 is newer than supported version 3/,
   );
 
   const unchanged = new DatabaseSync(dbPath);

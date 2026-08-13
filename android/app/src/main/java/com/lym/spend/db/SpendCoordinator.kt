@@ -108,10 +108,8 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
    * batch forever, hitting the same wall: the app said "Backup paused, will
    * retry automatically" indefinitely while nothing moved in either direction.
    *
-   * A command that cannot apply is recorded as rejected and skipped rather than
-   * retried, because a poison op is otherwise permanent. It is counted and
-   * reported, never silently dropped: the caller surfaces the number so the data
-   * is known to be incomplete instead of quietly wrong.
+   * Failed commands go to sync_rejected with their full JSON so a later retry
+   * can apply them. The cursor still advances so later pages are not wedged.
    */
   fun applyPulledOps(commandsJson: String, cursor: String, userId: String): String {
     spendDatabase.writeTransaction { database ->
@@ -136,23 +134,12 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
         }
         results.put(result.toJsonString())
       } catch (error: Throwable) {
+        val message = error.message ?: error::class.java.simpleName
         val detail = JSONObject()
-          .put("error", error.message ?: error::class.java.simpleName)
+          .put("error", message)
           .put("command", raw.take(300))
         rejected.put(detail)
-        // Mark it processed so the next pull does not stop on it again. The
-        // rejection is reported upward, so this is a decision the user can see
-        // rather than a silent discard.
-        runCatching {
-          val commandId = JSONObject(raw).optString("commandId", "")
-          if (commandId.isNotEmpty()) spendDatabase.writeTransaction { database ->
-            database.execSQL(
-              """INSERT OR IGNORE INTO processed_commands (command_id, kind, result_json, created_at)
-                 VALUES (?, ?, ?, ?)""",
-              arrayOf(commandId, "rejected", detail.toString(), System.currentTimeMillis()),
-            )
-          }
-        }
+        runCatching { upsertRejected(raw, message) }
       }
     }
     spendDatabase.writeTransaction { database ->
@@ -163,6 +150,50 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
     }
     return JSONObject()
       .put("applied", results)
+      .put("rejected", rejected)
+      .toString()
+  }
+
+  /**
+   * Re-dispatches every stored reject in its own transaction. Pulled retries
+   * must not go through execute() — that would echo a new outbox row.
+   */
+  fun retryRejectedOps(): String {
+    val rows = query("SELECT command_id, command_json FROM sync_rejected ORDER BY created_at")
+    var applied = 0
+    var rejected = 0
+    for (row in rows) {
+      val commandId = row["command_id"] as String
+      val commandJson = row["command_json"] as String
+      try {
+        val command = Command.fromJsonString(commandJson)
+        spendDatabase.writeTransaction { database ->
+          processedResult(database, command.commandId) ?: dispatch(database, command).also {
+            database.execSQL(
+              """INSERT INTO processed_commands (command_id, kind, result_json, created_at)
+                 VALUES (?, ?, ?, ?)""",
+              arrayOf(command.commandId, command.kind, it.toJsonString(), System.currentTimeMillis()),
+            )
+          }
+          database.delete("sync_rejected", "command_id = ?", arrayOf(commandId))
+        }
+        applied += 1
+      } catch (error: Throwable) {
+        rejected += 1
+        val message = (error.message ?: error::class.java.simpleName).take(1_000)
+        spendDatabase.writeTransaction { database ->
+          database.execSQL(
+            """UPDATE sync_rejected
+               SET attempt_count = attempt_count + 1, error = ?, updated_at = ?
+               WHERE command_id = ?""",
+            arrayOf(message, System.currentTimeMillis(), commandId),
+          )
+        }
+      }
+    }
+    return JSONObject()
+      .put("retried", rows.size)
+      .put("applied", applied)
       .put("rejected", rejected)
       .toString()
   }
@@ -700,6 +731,28 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
       arrayOf(command.payload.resolution.wireValue, System.currentTimeMillis(), match.id, match.revision),
     )
     return applied(command, match.id, match.revision + 1)
+  }
+
+  // INSERT OR IGNORE + UPDATE: older SQLite has no UPSERT.
+  private fun upsertRejected(raw: String, error: String) {
+    val commandId = runCatching { JSONObject(raw).optString("commandId", "") }.getOrDefault("")
+      .ifEmpty { raw }
+    val now = System.currentTimeMillis()
+    val message = error.take(1_000)
+    spendDatabase.writeTransaction { database ->
+      database.execSQL(
+        """INSERT OR IGNORE INTO sync_rejected (
+             command_id, command_json, error, attempt_count, created_at, updated_at
+           ) VALUES (?, ?, ?, 1, ?, ?)""",
+        arrayOf(commandId, raw, message, now, now),
+      )
+      database.execSQL(
+        """UPDATE sync_rejected
+           SET command_json = ?, error = ?, updated_at = ?
+           WHERE command_id = ?""",
+        arrayOf(raw, message, now, commandId),
+      )
+    }
   }
 
   private fun processedResult(database: SQLiteDatabase, commandId: String): CommandResult? =

@@ -6,6 +6,7 @@ type NativeSync = {
   recordOutboxFailure(id: string, error: string, maxAttempts: number): Promise<number>;
   recoverDeadLettersOnce(migrationKey: string): Promise<number>;
   applyPulledOps(commandsJson: string, cursor: string, userId: string): Promise<string>;
+  retryRejectedOps(): Promise<string>;
   getDeadLetterCount(): Promise<number>;
 };
 
