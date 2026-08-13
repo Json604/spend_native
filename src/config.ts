@@ -18,6 +18,7 @@ export type Config = {
   refreshTokenTtlDays: number;
   maxPushOps: number;
   maxPullOps: number;
+  groqApiKey: string | null;
 };
 
 export function loadConfig(): Config {
@@ -34,6 +35,7 @@ export function loadConfig(): Config {
     accessTokenTtl: process.env.ACCESS_TOKEN_TTL ?? '15m',
     refreshTokenTtlDays: Number(process.env.REFRESH_TOKEN_TTL_DAYS ?? 90),
     maxPushOps: Number(process.env.MAX_PUSH_OPS ?? 500),
-    maxPullOps: Number(process.env.MAX_PULL_OPS ?? 1000)
+    maxPullOps: Number(process.env.MAX_PULL_OPS ?? 1000),
+    groqApiKey: process.env.GROQ_API_KEY || null
   };
 }
