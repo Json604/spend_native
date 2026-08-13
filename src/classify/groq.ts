@@ -42,7 +42,7 @@ export function parseClassifyBody(body: unknown): ClassifyBody {
 
 export type ClassifyFn = (apiKey: string, body: ClassifyBody) => Promise<ClassifyResult | null>;
 
-export async function runClassify(apiKey: string | null, body: ClassifyBody, classify: ClassifyFn = classifyTransaction): Promise<ClassifyResult | null> {
+export async function runClassify(apiKey: string | null, body: ClassifyBody, classify: ClassifyFn): Promise<ClassifyResult | null> {
   if (!apiKey || body.allowed_categories.length === 0) return null;
   try {
     const result = await classify(apiKey, body);
@@ -55,7 +55,7 @@ export async function runClassify(apiKey: string | null, body: ClassifyBody, cla
 
 export function registerClassifyRoute(
   app: FastifyInstance,
-  opts: { groqApiKey: string | null; classify?: ClassifyFn; authenticate: preHandlerHookHandler }
+  opts: { groqApiKey: string | null; classify: ClassifyFn; authenticate: preHandlerHookHandler }
 ): void {
   app.post('/v1/classify/transaction', { preHandler: opts.authenticate }, async (request, reply) => {
     let body: ClassifyBody;
@@ -64,7 +64,7 @@ export function registerClassifyRoute(
     } catch {
       return reply.code(400).send({ error: { code: 'invalid_request', message: 'allowed_categories is required' } });
     }
-    const result = await runClassify(opts.groqApiKey, body, opts.classify ?? classifyTransaction);
+    const result = await runClassify(opts.groqApiKey, body, opts.classify);
     if (!result) return reply.code(204).send();
     return result;
   });

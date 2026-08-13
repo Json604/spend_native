@@ -6,7 +6,7 @@ import { ApiError, isApiError } from './errors.js';
 import { googleVerifier } from './auth/google.js';
 import { AuthService } from './auth/service.js';
 import { SyncService } from './sync/service.js';
-import { registerClassifyRoute } from './classify/groq.js';
+import { classifyTransaction, registerClassifyRoute } from './classify/groq.js';
 
 declare module 'fastify' {
   interface FastifyRequest { userId?: string }
@@ -45,7 +45,7 @@ export function buildApp(pool: Pool, config: Config): FastifyInstance {
     return sync.pull(request.userId!, since);
   });
 
-  registerClassifyRoute(app, { groqApiKey: config.groqApiKey, authenticate: requireAccess(auth) });
+  registerClassifyRoute(app, { groqApiKey: config.groqApiKey, classify: classifyTransaction, authenticate: requireAccess(auth) });
 
   app.setErrorHandler((error, request, reply) => {
     if (isApiError(error)) {

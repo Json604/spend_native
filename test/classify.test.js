@@ -14,7 +14,11 @@ const validBody = {
   ]
 };
 
-async function classifyApp(opts = {}) {
+const unusedClassify = async () => {
+  throw new Error('classify should not run');
+};
+
+async function classifyApp(opts) {
   const app = Fastify({ logger: false });
   registerClassifyRoute(app, {
     groqApiKey: opts.groqApiKey ?? null,
@@ -49,9 +53,7 @@ test('parseClassifyBody accepts a valid body', () => {
 test('POST /v1/classify/transaction is 204 when the groq key is missing', async () => {
   const app = await classifyApp({
     groqApiKey: null,
-    classify: async () => {
-      throw new Error('should not call Groq');
-    }
+    classify: unusedClassify
   });
   try {
     const res = await classifyPost(app, validBody);
@@ -65,9 +67,7 @@ test('POST /v1/classify/transaction is 204 when the groq key is missing', async 
 test('POST /v1/classify/transaction is 204 when allowed_categories is empty', async () => {
   const app = await classifyApp({
     groqApiKey: 'gsk_test',
-    classify: async () => {
-      throw new Error('should not call Groq for an empty list');
-    }
+    classify: unusedClassify
   });
   try {
     const res = await classifyPost(app, { ...validBody, allowed_categories: [] });
@@ -78,7 +78,7 @@ test('POST /v1/classify/transaction is 204 when allowed_categories is empty', as
 });
 
 test('POST /v1/classify/transaction is 400 when allowed_categories is missing', async () => {
-  const app = await classifyApp({ groqApiKey: 'gsk_test' });
+  const app = await classifyApp({ groqApiKey: 'gsk_test', classify: unusedClassify });
   try {
     const missing = await classifyPost(app, { merchant: 'x', amount_minor: 1, channel: 'sms', message: 'hi' });
     const notArray = await classifyPost(app, { ...validBody, allowed_categories: 'food' });
@@ -117,6 +117,23 @@ test('POST /v1/classify/transaction is 204 when the classifier misses or invents
   } finally {
     await missed.close();
     await unknown.close();
+  }
+});
+
+test('POST /v1/classify/transaction uses classifyTransaction the same way app.ts does', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({ choices: [{ message: { content: JSON.stringify({ category_id: 'food', confidence: 0.7 }) } }] })
+  });
+  const app = await classifyApp({ groqApiKey: 'gsk_test', classify: classifyTransaction });
+  try {
+    const res = await classifyPost(app, validBody);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.json(), { category_id: 'food', confidence: 0.7 });
+  } finally {
+    globalThis.fetch = original;
+    await app.close();
   }
 });
 
