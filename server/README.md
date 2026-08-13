@@ -16,25 +16,42 @@ Docker is not required for the checks above. To run the complete stack locally, 
 
 ## Deploy on the DigitalOcean droplet
 
-1. Install Docker Engine and the Compose plugin on Ubuntu 24.04, and install `git`.
-2. Clone this repository, enter `server/`, and create the environment file:
+Production is already running. **Do not clone over it.** Live paths:
 
-   ```sh
-   cd server
-   cp .env.example .env
-   chmod 600 .env
-   ```
+| What | Path |
+|---|---|
+| Compose project | `/opt/spend_server` |
+| Secrets | `/opt/spend_server/.env` |
+| Public URL | `https://spend.kartikey.xyz` (Caddy → `127.0.0.1:8080`) |
 
-3. Set a long random `ACCESS_TOKEN_SECRET`, the production Google OAuth client ID, and a long random `POSTGRES_PASSWORD`. Keep `DATABASE_URL` consistent with those Postgres values. Do not commit `.env`.
-4. Start and verify the service:
+Update code from a laptop (never overwrite `.env`):
 
-   ```sh
-   docker compose up -d --build
-   curl -fsS https://spend.kartikey.xyz/health
-   docker compose logs -f app
-   ```
+```sh
+rsync -az --exclude '.env' --exclude 'node_modules' --exclude 'dist' --exclude '.git' \
+  server/ droplet:/opt/spend_server/
+ssh droplet 'cd /opt/spend_server && docker compose up -d --build'
+```
 
-The compose file binds the app only to `127.0.0.1:8080`, which is the upstream for the already-running Caddy site. Caddy should proxy `https://spend.kartikey.xyz` to `http://127.0.0.1:8080`; TLS and public firewall exposure remain Caddy's responsibility.
+### First-time install on a new VM
+
+1. Install Docker Engine, the Compose plugin, Caddy, and `git` on Ubuntu 24.04.
+2. Copy this `server/` directory to `/opt/spend_server`.
+3. `cp .env.example .env && chmod 600 .env` and fill every required value.
+4. Point Caddy at `127.0.0.1:8080` for `spend.kartikey.xyz`.
+5. `docker compose up -d --build`
+6. `curl -fsS https://spend.kartikey.xyz/health`
+
+The compose file binds only to `127.0.0.1:8080`. TLS and the public firewall stay with Caddy.
+
+### Groq
+
+Set `GROQ_API_KEY` in `/opt/spend_server/.env`, then:
+
+```sh
+cd /opt/spend_server && docker compose up -d --force-recreate app
+```
+
+Empty key → classify returns 204. The Android app must not store this key.
 
 ## Backups and restore
 
