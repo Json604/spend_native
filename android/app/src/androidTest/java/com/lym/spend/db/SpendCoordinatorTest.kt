@@ -120,6 +120,72 @@ class SpendCoordinatorTest {
   }
 
   @Test
+  fun aliasToAnArchivedCategoryIsIgnoredThenRetargetedOntoTheNewLiveLabel() = withFreshDatabase { coordinator ->
+    val archivedId = createCategory(coordinator, "Food")
+    val remoteId = UUID.randomUUID().toString()
+    coordinator.execute(
+      Command.CreateCategory(
+        UUID.randomUUID().toString(),
+        CreateCategoryPayload(remoteId, "Food"),
+      ),
+    )
+    coordinator.execute(
+      Command.ArchiveCategory(
+        UUID.randomUUID().toString(),
+        expectedRevision = 1,
+        payload = ArchiveCategoryPayload(archivedId),
+      ),
+    )
+
+    try {
+      coordinator.execute(
+        Command.SetBudgetAmount(
+          UUID.randomUUID().toString(),
+          expectedRevision = 0,
+          payload = SetBudgetAmountPayload(
+            monthKey = "2026-08",
+            categoryId = remoteId,
+            amountMinor = 10_000,
+          ),
+        ),
+      )
+      fail("Expected setBudgetAmount on an archived alias to fail rather than write a tombstone")
+    } catch (_: Throwable) {
+      // FOREIGN KEY / row-not-found — either is fine so long as A is untouched.
+    }
+    assertEquals(
+      0L,
+      coordinator.query("SELECT count(*) AS n FROM budgets WHERE category_id = ?", arrayOf(archivedId))
+        .single()["n"],
+    )
+
+    val liveId = createCategory(coordinator, "Food")
+    coordinator.execute(
+      Command.SetBudgetAmount(
+        UUID.randomUUID().toString(),
+        expectedRevision = 0,
+        payload = SetBudgetAmountPayload(
+          monthKey = "2026-08",
+          categoryId = remoteId,
+          amountMinor = 10_000,
+        ),
+      ),
+    )
+
+    val alias = coordinator.query(
+      "SELECT local_id FROM category_aliases WHERE remote_id = ?",
+      arrayOf(remoteId),
+    ).single()
+    assertEquals(liveId, alias["local_id"])
+    val budget = coordinator.query(
+      "SELECT category_id, amount_minor FROM budgets WHERE month_key = ?",
+      arrayOf("2026-08"),
+    ).single()
+    assertEquals(liveId, budget["category_id"])
+    assertEquals(10_000L, budget["amount_minor"])
+  }
+
+  @Test
   fun newerDatabaseVersionIsRefusedWithoutResettingTheFile() {
     val file = freshDatabaseFile()
     val context = TemporaryDatabaseContext(testContext(), file)

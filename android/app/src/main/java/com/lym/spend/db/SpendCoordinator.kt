@@ -577,6 +577,7 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
           arrayOf(payload.categoryId, existingId),
         )
       }
+      retargetDeadAliases(database, existingId, payload.label)
       // Idempotent no-op. Do NOT rewrite the existing row: the local one may
       // carry edits the incoming op predates.
       return applied(command, existingId, categoryRevision(database, existingId))
@@ -596,6 +597,13 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
         now,
       ),
     )
+    // A stale alias can point this new id at an archived row with the same
+    // label. Drop it so the live insert is not shadowed.
+    database.execSQL(
+      "DELETE FROM category_aliases WHERE remote_id = ?",
+      arrayOf(payload.categoryId),
+    )
+    retargetDeadAliases(database, payload.categoryId, payload.label)
     return applied(command, payload.categoryId, 1)
   }
 
@@ -828,9 +836,24 @@ class SpendCoordinator private constructor(private val spendDatabase: SpendDatab
   private fun resolveCategoryId(database: SQLiteDatabase, id: String): String =
     querySingle(
       database,
-      "SELECT local_id FROM category_aliases WHERE remote_id = ?",
+      """SELECT a.local_id
+         FROM category_aliases a
+         JOIN categories c ON c.id = a.local_id AND c.deleted_at IS NULL
+         WHERE a.remote_id = ?""",
       arrayOf(id),
     ) { it.getString(0) } ?: id
+
+  private fun retargetDeadAliases(database: SQLiteDatabase, liveId: String, label: String) {
+    database.execSQL(
+      """UPDATE category_aliases
+         SET local_id = ?
+         WHERE local_id IN (
+           SELECT id FROM categories
+           WHERE deleted_at IS NOT NULL AND lower(label) = lower(?)
+         )""",
+      arrayOf(liveId, label),
+    )
+  }
 
   private fun resolveIncomingCategoryIds(database: SQLiteDatabase, command: Command): Command =
     when (command) {

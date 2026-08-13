@@ -605,3 +605,65 @@ test('a pulled createCategory with the same label aliases onto the live local ro
   );
   assert.equal(Number(remoteCategory[0].n), 0);
 });
+
+test('an alias to an archived category is ignored, then retargeted onto the new live label', async () => {
+  const {coordinator} = freshCoordinator('category-alias-archived');
+  const archivedId = await createCategory(coordinator, 'Food');
+  const remoteId = randomUUID();
+
+  await coordinator.execute({
+    commandId: randomUUID(),
+    kind: 'createCategory',
+    payload: {categoryId: remoteId, label: 'Food'},
+  });
+  await coordinator.execute({
+    commandId: randomUUID(),
+    kind: 'archiveCategory',
+    expectedRevision: 1,
+    payload: {categoryId: archivedId},
+  });
+
+  await assert.rejects(
+    coordinator.execute({
+      commandId: randomUUID(),
+      kind: 'setBudgetAmount',
+      expectedRevision: 0,
+      payload: {
+        monthKey: '2026-08',
+        categoryId: remoteId,
+        amountMinor: 10_000,
+      },
+    }),
+  );
+  const tombstone = await coordinator.query(
+    'SELECT count(*) AS n FROM budgets WHERE category_id = ?',
+    [archivedId],
+  );
+  assert.equal(Number(tombstone[0].n), 0, 'must not write a budget onto the archived row');
+
+  const liveId = await createCategory(coordinator, 'Food');
+  await coordinator.execute({
+    commandId: randomUUID(),
+    kind: 'setBudgetAmount',
+    expectedRevision: 0,
+    payload: {
+      monthKey: '2026-08',
+      categoryId: remoteId,
+      amountMinor: 10_000,
+    },
+  });
+
+  const [alias] = await coordinator.query(
+    'SELECT local_id FROM category_aliases WHERE remote_id = ?',
+    [remoteId],
+  );
+  assert.equal(alias.local_id, liveId);
+
+  const budgets = await coordinator.query(
+    'SELECT category_id, amount_minor FROM budgets WHERE month_key = ?',
+    ['2026-08'],
+  );
+  assert.equal(budgets.length, 1);
+  assert.equal(budgets[0].category_id, liveId);
+  assert.equal(Number(budgets[0].amount_minor), 10_000);
+});

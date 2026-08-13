@@ -704,6 +704,7 @@ class NodeDatabaseCoordinator implements DatabaseCoordinator {
       if (command.payload.categoryId !== existing.id) {
         this.#upsertCategoryAlias(command.payload.categoryId, existing.id);
       }
+      this.#retargetDeadAliases(existing.id, command.payload.label);
       return applied(command, existing.id, existing.revision);
     }
     this.#run(
@@ -721,6 +722,12 @@ class NodeDatabaseCoordinator implements DatabaseCoordinator {
         now,
       ],
     );
+    // A stale alias can point this new id at an archived row with the same
+    // label. Drop it so the live insert is not shadowed.
+    this.#run("DELETE FROM category_aliases WHERE remote_id = ?", [
+      command.payload.categoryId,
+    ]);
+    this.#retargetDeadAliases(command.payload.categoryId, command.payload.label);
     return applied(command, command.payload.categoryId, 1);
   }
 
@@ -898,7 +905,10 @@ class NodeDatabaseCoordinator implements DatabaseCoordinator {
   #resolveCategoryId(id: string): string {
     return (
       this.#get<{ local_id: string }>(
-        "SELECT local_id FROM category_aliases WHERE remote_id = ?",
+        `SELECT a.local_id
+         FROM category_aliases a
+         JOIN categories c ON c.id = a.local_id AND c.deleted_at IS NULL
+         WHERE a.remote_id = ?`,
         [id],
       )?.local_id ?? id
     );
@@ -908,6 +918,18 @@ class NodeDatabaseCoordinator implements DatabaseCoordinator {
     this.#run(
       "INSERT OR REPLACE INTO category_aliases (remote_id, local_id) VALUES (?, ?)",
       [remoteId, localId],
+    );
+  }
+
+  #retargetDeadAliases(liveId: string, label: string): void {
+    this.#run(
+      `UPDATE category_aliases
+       SET local_id = ?
+       WHERE local_id IN (
+         SELECT id FROM categories
+         WHERE deleted_at IS NOT NULL AND lower(label) = lower(?)
+       )`,
+      [liveId, label],
     );
   }
 
