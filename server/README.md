@@ -1,10 +1,10 @@
-# spend_native sync backend
+# Spend server
 
-Small offline-first sync companion for the Android expense tracker. It is a TypeScript Fastify service backed by PostgreSQL. The phone remains the day-to-day source of truth; the server supplies durable storage, an ordered outbox, and sessions.
+Sync, auth, and classification for the Spend Android app. This directory is the backend half of the monorepo (`spend_native`). TypeScript Fastify + PostgreSQL. The phone is the day-to-day source of truth; this process is durable storage, sessions, and Groq classification.
 
 ## Local checks
 
-Node 25 is expected.
+From this directory (`server/`). Node 25 is expected.
 
 ```sh
 npm install
@@ -12,14 +12,15 @@ npx tsc --noEmit
 node --test
 ```
 
-Docker is not required for the checks above. To run the complete stack locally, copy `.env.example` to `.env`, set a real `ACCESS_TOKEN_SECRET`, `POSTGRES_PASSWORD`, `GOOGLE_CLIENT_ID`, and `DATABASE_URL=postgres://spend:<password>@postgres:5432/spend`, then run `docker compose up --build`.
+Docker is not required for the checks above. To run the complete stack locally, copy `.env.example` to `.env`, set a real `ACCESS_TOKEN_SECRET`, `POSTGRES_PASSWORD`, `GOOGLE_CLIENT_ID`, and `DATABASE_URL=postgres://spend:<password>@postgres:5432/spend`, then run `docker compose up --build` from this directory.
 
 ## Deploy on the DigitalOcean droplet
 
 1. Install Docker Engine and the Compose plugin on Ubuntu 24.04, and install `git`.
-2. Clone this repository, enter it, and create the environment file:
+2. Clone this repository, enter `server/`, and create the environment file:
 
    ```sh
+   cd server
    cp .env.example .env
    chmod 600 .env
    ```
@@ -65,3 +66,4 @@ An operation is `{opId, entity, entityId, action, fields, source}`. `opId` is a 
 - `POST /v1/auth/refresh`
 - `POST /v1/sync/push` (Bearer access token)
 - `GET /v1/sync/pull?since=<cursor>` (Bearer access token)
+- `POST /v1/classify/transaction` (Bearer access token; 204 if `GROQ_API_KEY` is unset)
