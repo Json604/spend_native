@@ -222,8 +222,9 @@ class SpendSmsModule(reactContext: ReactApplicationContext) :
           sortOrder,
       )
     } catch (error: IllegalArgumentException) {
-      // Some providers omit DATE_SENT or SUBSCRIPTION_ID; drop them one at a
-      // time so the remaining columns can still be read.
+      // OEM providers may reject only one optional column. Retry each drop
+      // independently so DATE_SENT is not discarded when SUBSCRIPTION_ID is
+      // the only missing column.
       queryInboxDroppingOptionalColumns(projection, selection, selectionArgs, sortOrder, error)
     }
   }
@@ -235,15 +236,19 @@ class SpendSmsModule(reactContext: ReactApplicationContext) :
     sortOrder: String,
     firstError: IllegalArgumentException,
   ): Cursor? {
-    var remaining = projection.toList()
+    val singleDrops =
+        OPTIONAL_INBOX_COLUMNS.mapNotNull { column ->
+          if (column in projection) projection.filter { it != column } else null
+        }
+    val withoutOptional = projection.filter { it !in OPTIONAL_INBOX_COLUMNS }
+    val retries = (singleDrops + listOf(withoutOptional)).distinct()
     var lastError = firstError
-    for (column in OPTIONAL_INBOX_COLUMNS) {
-      if (column !in remaining) continue
-      remaining = remaining.filter { it != column }
+    for (candidate in retries) {
+      if (candidate.isEmpty() || candidate.toTypedArray().contentEquals(projection)) continue
       try {
         return reactApplicationContext.contentResolver.query(
             Telephony.Sms.Inbox.CONTENT_URI,
-            remaining.toTypedArray(),
+            candidate.toTypedArray(),
             selection,
             selectionArgs,
             sortOrder,
