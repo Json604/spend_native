@@ -7,7 +7,7 @@ import {
 
 export const SPEND_SOURCE_LABELS: Record<SpendSourceKind, SpendSourceLabel> = {
   sms: "SMS",
-  gmail: "Gmail",
+  gmail: "Account",
   manual: "Manual",
 };
 

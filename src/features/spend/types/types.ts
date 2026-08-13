@@ -1,6 +1,6 @@
 export type SpendSourceKind = "sms" | "gmail" | "manual";
 
-export type SpendSourceLabel = "SMS" | "Gmail" | "Manual";
+export type SpendSourceLabel = "SMS" | "Account" | "Manual";
 
 export type SpendSyncStatus = "idle" | "ready" | "needs_permission" | "syncing" | "error";
 
@@ -316,8 +316,6 @@ export type SpendContextType = {
   actions: {
     grantSmsAccess: () => Promise<void>;
     refreshSmsInbox: () => Promise<void>;
-    connectGmailInbox: () => Promise<void>;
-    refreshGmailInbox: () => Promise<void>;
     assignReviewCategory: (
       transactionId: string,
       categoryLabel: string,

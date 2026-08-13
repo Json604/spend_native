@@ -147,24 +147,6 @@ class SpendSmsModule(reactContext: ReactApplicationContext) :
     promise.resolve(false)
   }
 
-  // Deliberately no-ops: ignore-tracking lives in the JS repository
-  // (externalFingerprint dedupe) rather than native SharedPreferences.
-  @ReactMethod
-  fun markIgnored(
-    dedupeKey: String,
-    amountMinor: Int,
-    occurredAtMillis: Double,
-    categoryLabel: String?,
-    promise: Promise,
-  ) {
-    promise.resolve(null)
-  }
-
-  @ReactMethod
-  fun unmarkIgnored(dedupeKey: String, promise: Promise) {
-    promise.resolve(null)
-  }
-
   private fun readInboxForBackfill(sinceTimestamp: Double): List<SmsIngestInput> {
     return queryInboxMessages(sinceTimestamp, 0, BACKFILL_PROJECTION)?.use { cursor ->
       val addressIndex = cursor.getColumnIndex(Telephony.Sms.ADDRESS)

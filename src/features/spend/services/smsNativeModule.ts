@@ -29,13 +29,6 @@ type SpendSmsNativeModule = {
   listInboxMessagesSince(sinceTimestamp: number): Promise<SmsNativeInboxMessage[]>;
   backfillInboxSince(sinceTimestamp: number): Promise<SmsInboxBackfillResult>;
   consumePendingRefreshFlag(): Promise<boolean>;
-  markIgnored(
-    dedupeKey: string,
-    amountMinor: number,
-    occurredAtMillis: number,
-    categoryLabel: string | null,
-  ): Promise<void>;
-  unmarkIgnored(dedupeKey: string): Promise<void>;
 };
 
 const nativeModule = NativeModules.SpendSmsModule as
@@ -96,19 +89,4 @@ export const consumePendingSmsRefreshFlag = async (): Promise<boolean> => {
   }
 
   return nativeModule!.consumePendingRefreshFlag();
-};
-
-export const markSpendIgnored = async (
-  dedupeKey: string,
-  amountMinor: number,
-  occurredAtMillis: number,
-  categoryLabel: string | null,
-): Promise<void> => {
-  if (!hasSpendSmsNativeModule()) return;
-  await nativeModule!.markIgnored(dedupeKey, amountMinor, occurredAtMillis, categoryLabel);
-};
-
-export const unmarkSpendIgnored = async (dedupeKey: string): Promise<void> => {
-  if (!hasSpendSmsNativeModule()) return;
-  await nativeModule!.unmarkIgnored(dedupeKey);
 };
