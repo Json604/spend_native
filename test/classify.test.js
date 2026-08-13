@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { classifyTransaction, parseClassifyBody, runClassify } from '../src/classify/groq.ts';
+import Fastify from 'fastify';
+import { classifyTransaction, parseClassifyBody, registerClassifyRoute } from '../src/classify/groq.ts';
 
 const validBody = {
   merchant: 'Cafe Nero',
@@ -13,6 +14,27 @@ const validBody = {
   ]
 };
 
+async function classifyApp(opts = {}) {
+  const app = Fastify({ logger: false });
+  registerClassifyRoute(app, {
+    groqApiKey: opts.groqApiKey ?? null,
+    classify: opts.classify,
+    authenticate: opts.authenticate ?? (async (request) => {
+      request.userId = 'user-1';
+    })
+  });
+  return app;
+}
+
+async function classifyPost(app, payload, headers = {}) {
+  return app.inject({
+    method: 'POST',
+    url: '/v1/classify/transaction',
+    headers,
+    payload
+  });
+}
+
 test('parseClassifyBody rejects a missing allowed_categories array', () => {
   assert.throws(() => parseClassifyBody({ ...validBody, allowed_categories: undefined }), /allowed_categories is required/);
   assert.throws(() => parseClassifyBody({ merchant: 'x' }), /allowed_categories is required/);
@@ -24,30 +46,78 @@ test('parseClassifyBody accepts a valid body', () => {
   assert.deepEqual(parseClassifyBody(validBody), validBody);
 });
 
-test('runClassify is null when the groq key is missing without calling Groq', async () => {
-  const body = parseClassifyBody(validBody);
-  const result = await runClassify(null, body, async () => {
-    throw new Error('should not call Groq');
+test('POST /v1/classify/transaction is 204 when the groq key is missing', async () => {
+  const app = await classifyApp({
+    groqApiKey: null,
+    classify: async () => {
+      throw new Error('should not call Groq');
+    }
   });
-  assert.equal(result, null);
+  try {
+    const res = await classifyPost(app, validBody);
+    assert.equal(res.statusCode, 204);
+    assert.equal(res.body, '');
+  } finally {
+    await app.close();
+  }
 });
 
-test('runClassify returns an injected result and drops unknown ids', async () => {
-  const body = parseClassifyBody(validBody);
-  assert.deepEqual(await runClassify('gsk_test', body, async () => ({ category_id: 'food', confidence: 0.91 })), {
-    category_id: 'food',
-    confidence: 0.91
+test('POST /v1/classify/transaction is 204 when allowed_categories is empty', async () => {
+  const app = await classifyApp({
+    groqApiKey: 'gsk_test',
+    classify: async () => {
+      throw new Error('should not call Groq for an empty list');
+    }
   });
-  assert.equal(await runClassify('gsk_test', body, async () => ({ category_id: 'not-allowed', confidence: 0.9 })), null);
-  assert.equal(await runClassify('gsk_test', body, async () => null), null);
+  try {
+    const res = await classifyPost(app, { ...validBody, allowed_categories: [] });
+    assert.equal(res.statusCode, 204);
+  } finally {
+    await app.close();
+  }
 });
 
-test('runClassify is null for an empty allowed_categories list', async () => {
-  const body = parseClassifyBody({ ...validBody, allowed_categories: [] });
-  const result = await runClassify('gsk_test', body, async () => {
-    throw new Error('should not call Groq for an empty list');
+test('POST /v1/classify/transaction is 400 when allowed_categories is missing', async () => {
+  const app = await classifyApp({ groqApiKey: 'gsk_test' });
+  try {
+    const missing = await classifyPost(app, { merchant: 'x', amount_minor: 1, channel: 'sms', message: 'hi' });
+    const notArray = await classifyPost(app, { ...validBody, allowed_categories: 'food' });
+    assert.equal(missing.statusCode, 400);
+    assert.equal(missing.json().error.code, 'invalid_request');
+    assert.equal(notArray.statusCode, 400);
+    assert.equal(notArray.json().error.code, 'invalid_request');
+  } finally {
+    await app.close();
+  }
+});
+
+test('POST /v1/classify/transaction is 200 when the classifier returns a listed id', async () => {
+  const app = await classifyApp({
+    groqApiKey: 'gsk_test',
+    classify: async () => ({ category_id: 'food', confidence: 0.91 })
   });
-  assert.equal(result, null);
+  try {
+    const res = await classifyPost(app, validBody);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(res.json(), { category_id: 'food', confidence: 0.91 });
+  } finally {
+    await app.close();
+  }
+});
+
+test('POST /v1/classify/transaction is 204 when the classifier misses or invents an id', async () => {
+  const missed = await classifyApp({ groqApiKey: 'gsk_test', classify: async () => null });
+  const unknown = await classifyApp({
+    groqApiKey: 'gsk_test',
+    classify: async () => ({ category_id: 'not-allowed', confidence: 0.9 })
+  });
+  try {
+    assert.equal((await classifyPost(missed, validBody)).statusCode, 204);
+    assert.equal((await classifyPost(unknown, validBody)).statusCode, 204);
+  } finally {
+    await missed.close();
+    await unknown.close();
+  }
 });
 
 test('classifyTransaction posts the device request shape and accepts a listed id', async () => {

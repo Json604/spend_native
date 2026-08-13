@@ -1,3 +1,5 @@
+import type { FastifyInstance, preHandlerHookHandler } from 'fastify';
+
 const ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
 const MODEL = 'openai/gpt-oss-20b';
 const CONNECT_TIMEOUT_MS = 3_000;
@@ -49,6 +51,23 @@ export async function runClassify(apiKey: string | null, body: ClassifyBody, cla
   } catch {
     return null;
   }
+}
+
+export function registerClassifyRoute(
+  app: FastifyInstance,
+  opts: { groqApiKey: string | null; classify?: ClassifyFn; authenticate: preHandlerHookHandler }
+): void {
+  app.post('/v1/classify/transaction', { preHandler: opts.authenticate }, async (request, reply) => {
+    let body: ClassifyBody;
+    try {
+      body = parseClassifyBody(request.body);
+    } catch {
+      return reply.code(400).send({ error: { code: 'invalid_request', message: 'allowed_categories is required' } });
+    }
+    const result = await runClassify(opts.groqApiKey, body, opts.classify ?? classifyTransaction);
+    if (!result) return reply.code(204).send();
+    return result;
+  });
 }
 
 export async function classifyTransaction(apiKey: string, body: ClassifyBody): Promise<ClassifyResult | null> {

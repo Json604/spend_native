@@ -6,7 +6,7 @@ import { ApiError, isApiError } from './errors.js';
 import { googleVerifier } from './auth/google.js';
 import { AuthService } from './auth/service.js';
 import { SyncService } from './sync/service.js';
-import { classifyTransaction, parseClassifyBody, type ClassifyBody } from './classify/groq.js';
+import { registerClassifyRoute } from './classify/groq.js';
 
 declare module 'fastify' {
   interface FastifyRequest { userId?: string }
@@ -45,23 +45,7 @@ export function buildApp(pool: Pool, config: Config): FastifyInstance {
     return sync.pull(request.userId!, since);
   });
 
-  app.post('/v1/classify/transaction', { preHandler: requireAccess(auth) }, async (request, reply) => {
-    let body: ClassifyBody;
-    try {
-      body = parseClassifyBody(request.body);
-    } catch {
-      throw new ApiError(400, 'invalid_request', 'allowed_categories is required');
-    }
-    if (!config.groqApiKey) return reply.code(204).send();
-    let result = null;
-    try {
-      result = await classifyTransaction(config.groqApiKey, body);
-    } catch {
-      result = null;
-    }
-    if (!result) return reply.code(204).send();
-    return result;
-  });
+  registerClassifyRoute(app, { groqApiKey: config.groqApiKey, authenticate: requireAccess(auth) });
 
   app.setErrorHandler((error, request, reply) => {
     if (isApiError(error)) {
