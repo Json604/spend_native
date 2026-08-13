@@ -165,9 +165,18 @@ class SecureTokenStoreModule(reactContext: ReactApplicationContext) :
     private const val TAG_BITS = 128
     private const val ERROR = "SECURE_STORAGE_ERROR"
 
-    fun readGroqApiKey(context: android.content.Context): String? {
+    fun readAccessToken(context: android.content.Context): String? {
+      val sessionJson = readDecrypted(context, SESSION_KEY) ?: return null
+      val access = org.json.JSONObject(sessionJson).optString("access")
+      return access.takeIf { it.isNotBlank() }
+    }
+
+    fun readGroqApiKey(context: android.content.Context): String? =
+      readDecrypted(context, GROQ_API_KEY)
+
+    private fun readDecrypted(context: android.content.Context, preferenceKey: String): String? {
       val encrypted = context.getSharedPreferences(PREFERENCES, 0)
-        .getString(GROQ_API_KEY, null) ?: return null
+        .getString(preferenceKey, null) ?: return null
       val parts = encrypted.split(":", limit = 2)
       check(parts.size == 2) { "Malformed encrypted value" }
       val keyStore = KeyStore.getInstance(KEYSTORE).apply { load(null) }

@@ -7,7 +7,6 @@ import {
   StatusBar,
   StyleSheet,
   Text,
-  TextInput,
   View,
 } from "react-native";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
@@ -21,7 +20,6 @@ import { getSmsPermissionState, type SmsPermissionState } from "../../spend/serv
 import { useSpend } from "../../spend/store/SpendProvider";
 import type { StackParamList } from "../../../navigation/types";
 import { checkForUpdate, currentVersion } from "../../../update/updateChecker";
-import { clearGroqApiKey, readGroqApiKey, writeGroqApiKey } from "../../../auth/secureTokenStore";
 
 type ProfileNavigation = StackNavigationProp<StackParamList, "Profile">;
 type UserRecord = Record<string, unknown>;
@@ -124,15 +122,6 @@ export default function ProfileScreen() {
   const [permissionBusy, setPermissionBusy] = useState(false);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [manualLastSyncedAt, setManualLastSyncedAt] = useState<string | undefined>();
-  const [groqKey, setGroqKey] = useState("");
-  const [hasGroqKey, setHasGroqKey] = useState(false);
-  const [savingGroqKey, setSavingGroqKey] = useState(false);
-
-  useEffect(() => {
-    readGroqApiKey()
-      .then((key) => setHasGroqKey(Boolean(key)))
-      .catch(() => undefined);
-  }, []);
 
   const refreshDetails = useCallback(async () => {
     try {
@@ -265,64 +254,6 @@ export default function ProfileScreen() {
           <ProfileRow icon="receipt-text-outline" label="Transactions" value={`${transactionCount} this month`} />
         </Section>
 
-        <Section title="AI CLASSIFICATION">
-          <View style={styles.keyForm}>
-            <Text style={styles.keyTitle}>Groq API key</Text>
-            <Text style={styles.keyHint}>
-              Opt in to send new transaction-message context and this month&apos;s category names to Groq. Spend will always ask before applying its suggestion.
-            </Text>
-            <TextInput
-              autoCapitalize="none"
-              autoCorrect={false}
-              editable={!savingGroqKey}
-              onChangeText={setGroqKey}
-              placeholder={hasGroqKey ? "Key saved securely" : "Add your key"}
-              placeholderTextColor="#6F6A62"
-              secureTextEntry
-              style={styles.keyInput}
-              value={groqKey}
-            />
-            <View style={styles.keyActions}>
-              {hasGroqKey ? (
-                <Pressable
-                  disabled={savingGroqKey}
-                  onPress={async () => {
-                    setSavingGroqKey(true);
-                    try {
-                      await clearGroqApiKey();
-                      setHasGroqKey(false);
-                      setGroqKey("");
-                    } finally {
-                      setSavingGroqKey(false);
-                    }
-                  }}
-                  style={styles.keySecondaryButton}
-                >
-                  <Text style={styles.keySecondaryText}>Remove</Text>
-                </Pressable>
-              ) : null}
-              <Pressable
-                disabled={savingGroqKey || !groqKey.trim()}
-                onPress={async () => {
-                  setSavingGroqKey(true);
-                  try {
-                    await writeGroqApiKey(groqKey);
-                    setHasGroqKey(true);
-                    setGroqKey("");
-                  } catch (error) {
-                    setProfileError(`Groq key could not be saved: ${friendlyError(error)}`);
-                  } finally {
-                    setSavingGroqKey(false);
-                  }
-                }}
-                style={[styles.keyPrimaryButton, (!groqKey.trim() || savingGroqKey) && styles.keyButtonDisabled]}
-              >
-                <Text style={styles.keyPrimaryText}>{savingGroqKey ? "Saving…" : "Save key"}</Text>
-              </Pressable>
-            </View>
-          </View>
-        </Section>
-
         <Section title="ABOUT">
           <ProfileRow
             icon="information-outline"
@@ -341,9 +272,7 @@ export default function ProfileScreen() {
           <ProfileRow
             icon="shield-lock-outline"
             label="Privacy stance"
-            value={hasGroqKey
-              ? "Groq classification is enabled; new transaction context is sent to Groq for your confirmation."
-              : "SMS is parsed on this device. Cloud AI remains off until you add a key."}
+            value="SMS is parsed on this device. Signed-in classification suggestions go through Spend and wait for your confirmation."
           />
         </Section>
 
@@ -389,14 +318,4 @@ const styles = StyleSheet.create({
   signOut: { minHeight: 55, borderRadius: 17, borderWidth: 1, borderColor: "rgba(255,142,114,0.26)", backgroundColor: "rgba(255,142,114,0.06)", flexDirection: "row", gap: 10, alignItems: "center", justifyContent: "center", marginTop: 2 },
   signOutText: { color: "#FF8E72", fontSize: 14, fontWeight: "700" },
   offlineFooter: { color: "#6F6A62", fontSize: 12, lineHeight: 18, textAlign: "center", marginTop: 4, paddingHorizontal: 20 },
-  keyForm: { padding: 16, gap: 11 },
-  keyTitle: { color: "#D8CDB0", fontSize: 14, fontWeight: "600" },
-  keyHint: { color: "#8F8F96", fontSize: 11, lineHeight: 17 },
-  keyInput: { minHeight: 48, borderRadius: 13, borderWidth: 1, borderColor: "rgba(245,230,184,0.14)", backgroundColor: "rgba(0,0,0,0.24)", color: "#F5E6B8", paddingHorizontal: 13 },
-  keyActions: { flexDirection: "row", justifyContent: "flex-end", gap: 9 },
-  keyPrimaryButton: { minHeight: 40, paddingHorizontal: 16, borderRadius: 12, backgroundColor: "#FFD27A", alignItems: "center", justifyContent: "center" },
-  keyPrimaryText: { color: "#21160A", fontSize: 13, fontWeight: "700" },
-  keySecondaryButton: { minHeight: 40, paddingHorizontal: 15, borderRadius: 12, borderWidth: 1, borderColor: "rgba(255,142,114,0.3)", alignItems: "center", justifyContent: "center" },
-  keySecondaryText: { color: "#FF8E72", fontSize: 13, fontWeight: "600" },
-  keyButtonDisabled: { opacity: 0.45 },
 });

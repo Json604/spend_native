@@ -12,8 +12,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 object GroqTransactionClassifier {
-  private const val ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
-  private const val MODEL = "openai/gpt-oss-20b"
+  private const val ENDPOINT = "https://spend.kartikey.xyz/v1/classify/transaction"
 
   data class Suggestion(val categoryId: String, val label: String, val confidence: Double)
 
@@ -23,7 +22,7 @@ object GroqTransactionClassifier {
     transactionId: String,
     messageBody: String,
   ): Suggestion? {
-    val apiKey = SecureTokenStoreModule.readGroqApiKey(context) ?: return null
+    val accessToken = SecureTokenStoreModule.readAccessToken(context) ?: return null
     val transaction = coordinator.query(
       """SELECT t.merchant_raw, t.amount_minor, t.channel, t.accounting_month_key,
                 t.revision, a.category_id
@@ -51,7 +50,7 @@ object GroqTransactionClassifier {
     }
     if (categories.isEmpty()) return null
 
-    val result = request(apiKey, transaction, messageBody, categories) ?: return null
+    val result = request(accessToken, transaction, messageBody, categories) ?: return null
     val matched = categories.firstOrNull { it.id == result.first } ?: return null
     val revision = (transaction["revision"] as? Number)?.toInt() ?: return null
     val suggestionId = stableUuid("groq:$transactionId:${matched.id}").toString()
@@ -73,7 +72,7 @@ object GroqTransactionClassifier {
   }
 
   private fun request(
-    apiKey: String,
+    accessToken: String,
     transaction: Map<String, Any?>,
     messageBody: String,
     categories: List<Category>,
@@ -83,36 +82,12 @@ object GroqTransactionClassifier {
         array.put(JSONObject().put("id", category.id).put("label", category.label))
       }
     }
-    val transactionJson = JSONObject()
+    val payload = JSONObject()
       .put("merchant", transaction["merchant_raw"]?.toString().orEmpty())
       .put("amount_minor", (transaction["amount_minor"] as? Number)?.toLong() ?: 0L)
       .put("channel", transaction["channel"]?.toString().orEmpty())
       .put("message", messageBody.take(2_000))
-    val userContent = JSONObject()
-      .put("transaction", transactionJson)
       .put("allowed_categories", categoryJson)
-      .toString()
-    val categoryIds = JSONArray().also { array -> categories.forEach { array.put(it.id) } }
-    val schema = JSONObject()
-      .put("type", "object")
-      .put("additionalProperties", false)
-      .put("required", JSONArray(listOf("category_id", "confidence")))
-      .put("properties", JSONObject()
-        .put("category_id", JSONObject().put("type", "string").put("enum", categoryIds))
-        .put("confidence", JSONObject().put("type", "number").put("minimum", 0).put("maximum", 1)))
-    val payload = JSONObject()
-      .put("model", MODEL)
-      .put("temperature", 0)
-      .put("max_completion_tokens", 120)
-      .put("messages", JSONArray()
-        .put(JSONObject().put("role", "system").put("content", "Classify the transaction into exactly one allowed monthly budget category. Use merchant, payment channel, and message context. Never invent a category."))
-        .put(JSONObject().put("role", "user").put("content", userContent)))
-      .put("response_format", JSONObject()
-        .put("type", "json_schema")
-        .put("json_schema", JSONObject()
-          .put("name", "transaction_category")
-          .put("strict", true)
-          .put("schema", schema)))
 
     val connection = URL(ENDPOINT).openConnection() as HttpURLConnection
     return try {
@@ -120,15 +95,12 @@ object GroqTransactionClassifier {
       connection.connectTimeout = 3_000
       connection.readTimeout = 4_000
       connection.doOutput = true
-      connection.setRequestProperty("Authorization", "Bearer $apiKey")
+      connection.setRequestProperty("Authorization", "Bearer $accessToken")
       connection.setRequestProperty("Content-Type", "application/json")
       connection.outputStream.use { it.write(payload.toString().toByteArray(StandardCharsets.UTF_8)) }
-      if (connection.responseCode !in 200..299) return null
-      val response = connection.inputStream.bufferedReader().use { it.readText() }
-      val content = JSONObject(response)
-        .getJSONArray("choices").getJSONObject(0)
-        .getJSONObject("message").getString("content")
-      val parsed = JSONObject(content)
+      // 204 = no suggestion. 401 = skip; native must not refresh tokens here.
+      if (connection.responseCode != HttpURLConnection.HTTP_OK) return null
+      val parsed = JSONObject(connection.inputStream.bufferedReader().use { it.readText() })
       parsed.getString("category_id") to parsed.getDouble("confidence")
     } catch (_: Throwable) {
       null
