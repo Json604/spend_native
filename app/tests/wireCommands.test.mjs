@@ -150,3 +150,14 @@ test('valid UUID command ids are preserved on the wire', () => {
   const id = '11111111-1111-4111-8111-111111111111';
   assert.equal(wireOperationId(id), id);
 });
+
+// The server validates opId against this exact pattern and rejects the WHOLE
+// push batch on the first failure, so one malformed id stalls every sync.
+const SERVER_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+test('every wire id the server could see is a well-formed UUID', () => {
+  for (let index = 0; index < 20_000; index += 1) {
+    const id = wireOperationId(`sms-transaction:${index}`);
+    assert.match(id, SERVER_UUID, `wireOperationId('sms-transaction:${index}') is not a UUID`);
+  }
+});

@@ -24,8 +24,11 @@ export function wireOperationId(localId: string): string {
     first = Math.imul(first ^ localId.charCodeAt(index), 16777619) >>> 0;
     second = Math.imul(second + localId.charCodeAt(index), 2246822519) >>> 0;
   }
-  const hex = (value: number) => value.toString(16).padStart(8, "0");
-  const raw = `${hex(first)}${hex(second)}${hex(first ^ second)}${hex((first + second) >>> 0)}`;
+  // See deterministicOpId: `^` is signed in JS, so the xor term has to be
+  // coerced back to unsigned or its "-" corrupts the assembled UUID and the
+  // server rejects the whole batch.
+  const hex = (value: number) => (value >>> 0).toString(16).padStart(8, "0");
+  const raw = `${hex(first)}${hex(second)}${hex(first ^ second)}${hex(first + second)}`;
   return [
     raw.slice(0, 8),
     raw.slice(8, 12),

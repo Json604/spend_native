@@ -117,3 +117,17 @@ test('unplanned planType stays on create and does not add a second op', () => {
   assert.equal(ops[0].kind, 'createTransactionFromAlert');
   assert.equal(ops[0].payload.transaction.planType, 'unplanned');
 });
+
+// A full backup pushes these ids by the hundred. The server rejects the entire
+// batch on the first non-UUID opId, which pauses backup permanently, so the
+// shape has to hold for every row and not just a lucky sample.
+const SERVER_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+test('every backup op id is a well-formed UUID', () => {
+  for (let index = 0; index < 20_000; index += 1) {
+    for (const entityId of [`sms:${index}`, `sms:${index}:split`, `sms:${index}:ignore`]) {
+      const id = deterministicOpId('transactions', entityId);
+      assert.match(id, SERVER_UUID, `deterministicOpId('transactions', '${entityId}') is not a UUID`);
+    }
+  }
+});

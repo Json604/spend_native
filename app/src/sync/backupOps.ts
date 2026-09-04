@@ -61,8 +61,14 @@ export function deterministicOpId(entity: string, entityId: string): string {
     h1 = Math.imul(h1 ^ input.charCodeAt(index), 16777619) >>> 0;
     h2 = Math.imul(h2 + input.charCodeAt(index), 2246822519) >>> 0;
   }
-  const hex = (value: number) => value.toString(16).padStart(8, "0");
-  const raw = `${hex(h1)}${hex(h2)}${hex(h1 ^ h2)}${hex((h1 + h2) >>> 0)}`;
+  // `>>> 0` on EVERY term, including the xor. JS `^` yields a SIGNED 32-bit
+  // int, so a result with the top bit set stringifies with a leading "-" that
+  // padStart cannot pad away. That dash landed inside the sliced groups and
+  // produced ids like `0552fd08-fa2a-5132-8-87-d3c6ff7dce3a` — six groups, not
+  // five. The server validates opId as a UUID and rejects the ENTIRE push batch
+  // on the first bad one, so a single poisoned row paused backup for good.
+  const hex = (value: number) => (value >>> 0).toString(16).padStart(8, "0");
+  const raw = `${hex(h1)}${hex(h2)}${hex(h1 ^ h2)}${hex(h1 + h2)}`;
   return [
     raw.slice(0, 8),
     raw.slice(8, 12),

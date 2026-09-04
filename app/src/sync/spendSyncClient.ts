@@ -85,7 +85,11 @@ export class SpendSyncClient {
     let pulled = 0;
     let lastError: string | undefined;
     try {
-      await this.deps.nativeSync.recoverDeadLettersOnce("wire_uuid_recovery_v1");
+      // v2: rows that dead-lettered because their wire id was malformed are
+      // retryable now that the id is a real UUID. Bumping the key gives each
+      // device exactly one more pass over them instead of stranding real
+      // edits — and clears the "needs attention" badge the old bug left.
+      await this.deps.nativeSync.recoverDeadLettersOnce("wire_uuid_recovery_v2");
       pushed = await this.drainOutbox(await this.deps.secureDeviceId());
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
