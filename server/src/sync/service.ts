@@ -2,7 +2,7 @@ import type { Pool, PoolClient } from 'pg';
 import type { Db } from '../db.js';
 import { ApiError } from '../errors.js';
 import { applyFieldLww, computePullCursor, type RowState, type SyncOp } from './conflict.js';
-import { deriveOpId } from './opIds.js';
+import { canonicalOpId, deriveOpId } from './opIds.js';
 
 const TABLES: Record<string, string> = {
   transactions: 'transactions',
@@ -45,7 +45,10 @@ export class SyncService {
 
   private async applyOne(client: PoolClient, userId: string, deviceId: string, op: SyncOp): Promise<{ conflict: boolean; value: unknown }> {
     validateOp(op);
-    const duplicate = await client.query<{ user_id: string; outcome: unknown }>('SELECT user_id,outcome FROM sync_ops WHERE op_id=$1 FOR UPDATE', [op.opId]);
+    // What goes in the table (sync_ops.op_id is a uuid) versus what the client
+    // called it. These differ only for legacy malformed ids.
+    const storedOpId = canonicalOpId(op.opId);
+    const duplicate = await client.query<{ user_id: string; outcome: unknown }>('SELECT user_id,outcome FROM sync_ops WHERE op_id=$1 FOR UPDATE', [storedOpId]);
     if (duplicate.rowCount) {
       if (duplicate.rows[0].user_id !== userId) throw new ApiError(409, 'op_id_taken', 'Operation id belongs to another user');
       return { conflict: false, value: duplicate.rows[0].outcome };
@@ -120,9 +123,9 @@ export class SyncService {
         : `($1,$2,$3,$4,now(),$5,$6)`;
       await client.query(`INSERT INTO ${table}(${columns}) VALUES ${valueSql}`, values);
     }
-    await client.query('INSERT INTO sync_ops(op_id,user_id,device_id,entity_type,entity_id,action,payload,outcome,server_seq) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)', [op.opId, userId, deviceId, op.entity, op.entityId, op.action, op, outcome, seq]);
+    await client.query('INSERT INTO sync_ops(op_id,user_id,device_id,entity_type,entity_id,action,payload,outcome,server_seq) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)', [storedOpId, userId, deviceId, op.entity, op.entityId, op.action, op, outcome, seq]);
     if (op.entity === 'categories' && op.action === 'delete') {
-      await this.cascadeCategoryDelete(client, userId, deviceId, op);
+      await this.cascadeCategoryDelete(client, userId, deviceId, { ...op, opId: storedOpId });
     }
     return { conflict: result.skipped, value: outcome };
   }
@@ -237,8 +240,15 @@ async function claimByNaturalKey(client: PoolClient, userId: string, op: SyncOp)
 }
 
 function validateOp(op: SyncOp): void {
-  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-  if (!op || typeof op.opId !== 'string' || !uuid.test(op.opId)) throw new ApiError(400, 'invalid_operation', 'Every operation needs a UUID opId');
+  // Deliberately NOT a UUID check. Builds up to 2.3.13 mint a malformed id for
+  // roughly one operation in 250, and those installs can never be updated —
+  // their signing key is gone — so rejecting the shape rejects the only copy of
+  // that user's data forever. canonicalOpId folds anything non-UUID onto a
+  // stable derived uuid for storage; the id the client sent is echoed back
+  // unchanged, because the client matches the response to its outbox by it.
+  if (!op || typeof op.opId !== 'string' || op.opId.trim() === '' || op.opId.length > 200) {
+    throw new ApiError(400, 'invalid_operation', 'Every operation needs a non-empty opId of at most 200 characters');
+  }
   if (!TABLES[op.entity]) throw new ApiError(400, 'invalid_operation', 'Unknown sync entity');
   // entityId is DEVICE-generated and deliberately meaningful — 'sms:8393' embeds
   // the provider message id, which is what makes re-ingesting the same SMS

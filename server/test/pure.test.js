@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { RefreshFamilyStore } from '../src/auth/refresh.ts';
 import { applyFieldLww, computePullCursor } from '../src/sync/conflict.ts';
 import { IdempotencyStore } from '../src/sync/idempotency.ts';
-import { deriveOpId } from '../src/sync/opIds.ts';
+import { canonicalOpId, deriveOpId } from '../src/sync/opIds.ts';
 
 test('reuse of a rotated refresh token revokes the whole family', () => {
   const store = new RefreshFamilyStore();
@@ -84,4 +84,35 @@ test('a tombstone propagates and cursor stops before an unapplied operation', ()
     { serverSeq: 9, applied: false, value: 'b' },
     { serverSeq: 10, applied: true, value: 'c' }
   ], 7), 8);
+});
+
+// Builds up to 2.3.13 mint op ids with a signed-xor bug that emits a stray "-",
+// e.g. `0552fd08-fa2a-5132-8-87-d3c6ff7dce3a`. Those installs are signed with a
+// key that no longer exists, so they can never be updated: the server has to
+// accept what they send. sync_ops.op_id is a Postgres uuid, so a malformed id
+// is folded to a stable uuid rather than stored verbatim.
+test('a malformed client op id folds to a stable uuid', () => {
+  const malformed = '0552fd08-fa2a-5132-8-87-d3c6ff7dce3a';
+  const folded = canonicalOpId(malformed);
+  assert.match(folded, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  // Stable, or idempotency breaks and every retry duplicates the operation.
+  assert.equal(folded, canonicalOpId(malformed));
+  assert.notEqual(folded, canonicalOpId('615f861f-9eaf-595d-b0-f-00be000eff7c'));
+});
+
+test('a well-formed op id is left exactly as it is', () => {
+  const valid = '11111111-1111-4111-8111-111111111111';
+  assert.equal(canonicalOpId(valid), valid);
+  // Fixed clients send real UUIDs; folding those would orphan existing rows.
+  assert.equal(canonicalOpId(valid.toUpperCase()), valid.toUpperCase());
+});
+
+test('folding cannot collide with a uuid a client could legitimately send', () => {
+  // The fold is derived through a distinct prefix, so no malformed id can be
+  // engineered onto an existing op's row.
+  const seen = new Set();
+  for (let index = 0; index < 5_000; index += 1) {
+    seen.add(canonicalOpId(`0552fd08-fa2a-5132-8-87-d3c6ff7dce${index}`));
+  }
+  assert.equal(seen.size, 5_000);
 });
