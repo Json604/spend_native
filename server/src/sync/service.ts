@@ -48,11 +48,14 @@ export class SyncService {
     // What goes in the table (sync_ops.op_id is a uuid) versus what the client
     // called it. These differ only for legacy malformed ids.
     const storedOpId = canonicalOpId(op.opId);
-    const duplicate = await client.query<{ user_id: string; outcome: unknown }>('SELECT user_id,outcome FROM sync_ops WHERE op_id=$1 FOR UPDATE', [storedOpId]);
-    if (duplicate.rowCount) {
-      if (duplicate.rows[0].user_id !== userId) throw new ApiError(409, 'op_id_taken', 'Operation id belongs to another user');
-      return { conflict: false, value: duplicate.rows[0].outcome };
-    }
+    // Scoped by user. Op ids are derived from entity ids, and entity ids are
+    // unique on a device rather than across accounts — two people both have an
+    // 'sms:8393'. Unscoped, this found the OTHER user's row and raised 409
+    // op_id_taken, which fails the whole batch and pauses that user's backup
+    // permanently, since every retry rebuilds the identical collision. With the
+    // key scoped to the account, two users' operations simply never meet.
+    const duplicate = await client.query<{ outcome: unknown }>('SELECT outcome FROM sync_ops WHERE op_id=$1 AND user_id=$2 FOR UPDATE', [storedOpId, userId]);
+    if (duplicate.rowCount) return { conflict: false, value: duplicate.rows[0].outcome };
     const seqResult = await client.query<{ nextval: string }>("SELECT nextval('sync_sequence')");
     const seq = Number(seqResult.rows[0].nextval);
     const table = TABLES[op.entity];
@@ -150,7 +153,7 @@ export class SyncService {
       );
       for (const row of dependents.rows) {
         const childOpId = deriveOpId(op.opId, entity, row.id);
-        const seen = await client.query('SELECT 1 FROM sync_ops WHERE op_id=$1', [childOpId]);
+        const seen = await client.query('SELECT 1 FROM sync_ops WHERE op_id=$1 AND user_id=$2', [childOpId, userId]);
         if (seen.rowCount) continue;
         const seqResult = await client.query<{ nextval: string }>("SELECT nextval('sync_sequence')");
         const seq = Number(seqResult.rows[0].nextval);
