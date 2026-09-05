@@ -3,6 +3,10 @@ import { nextPullCursor, normalizeRemoteCommand, parsePayload, wireOperationId, 
 
 const BATCH_SIZE = 50;
 const MAX_ATTEMPTS = 8;
+// A pulled command that keeps failing is eventually not worth blocking on. Some
+// cannot be cleared at all: a reject whose command had no id is filed under its
+// own JSON blob as the key, and no command will ever match that to delete it.
+const MAX_REJECT_ATTEMPTS = 8;
 
 type OutboxRow = {
   id: string;
@@ -63,8 +67,26 @@ export class SpendSyncClient {
     return this.inFlight;
   }
 
+  /**
+   * Everything the user needs to look at: outbox rows that gave up pushing, and
+   * pulled commands that gave up applying. The UI shows one "needs attention"
+   * count, and from the user's side these are the same thing — a change that did
+   * not make it.
+   */
   async deadLetterCount(): Promise<number> {
-    return this.deps.nativeSync.getDeadLetterCount();
+    const [outbox, stuck] = await Promise.all([
+      this.deps.nativeSync.getDeadLetterCount(),
+      this.stuckRejectCount(),
+    ]);
+    return outbox + stuck;
+  }
+
+  private async stuckRejectCount(): Promise<number> {
+    const rows = await this.deps.nativeCoordinator.query<{ count: number | string }>(
+      "SELECT COUNT(*) AS count FROM sync_rejected WHERE attempt_count >= ?",
+      [MAX_REJECT_ATTEMPTS],
+    );
+    return Number(rows[0]?.count ?? 0);
   }
 
   async pendingOutboxCount(): Promise<number> {
@@ -303,8 +325,14 @@ export class SpendSyncClient {
       if (ops.length === 0 || nextCursor === cursor) break;
       cursor = nextCursor;
     }
+    // Only rejects still inside their retry budget count as a sync failure. One
+    // that has exhausted it is never going to apply, and blocking on it forever
+    // means a single dead row hides whether anything else is working — the app
+    // says "Backup paused" while a complete backup is landing every few minutes.
+    // It is surfaced through deadLetterCount instead, not swallowed.
     const leftoverRows = await this.deps.nativeCoordinator.query<{ count: number | string }>(
-      "SELECT COUNT(*) AS count FROM sync_rejected",
+      "SELECT COUNT(*) AS count FROM sync_rejected WHERE attempt_count < ?",
+      [MAX_REJECT_ATTEMPTS],
     );
     const leftover = Number(leftoverRows[0]?.count ?? 0);
     // A rejected op is data the server has and this device does not. Apply-report

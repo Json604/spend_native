@@ -9,7 +9,7 @@ function jsonResponse(body) {
   };
 }
 
-function stubbedClient({leftover = 0, applyReport = '{"applied":[],"rejected":[]}', pullOps = []} = {}) {
+function stubbedClient({leftover = 0, stuck = 0, deadLetters = 0, applyReport = '{"applied":[],"rejected":[]}', pullOps = []} = {}) {
   const calls = [];
   const nativeSync = {
     acknowledgeOutbox: async () => 0,
@@ -30,7 +30,7 @@ function stubbedClient({leftover = 0, applyReport = '{"applied":[],"rejected":[]
       calls.push('retryRejectedOps');
       return JSON.stringify({retried: 0, applied: 0, rejected: 0});
     },
-    getDeadLetterCount: async () => 0,
+    getDeadLetterCount: async () => deadLetters,
   };
   const nativeCoordinator = {
     query: async sql => {
@@ -38,7 +38,9 @@ function stubbedClient({leftover = 0, applyReport = '{"applied":[],"rejected":[]
       if (sql.includes("key = 'owner_id'")) return [{value: 'user-1'}];
       if (sql.includes('FROM outbox')) return [];
       if (sql.includes("key = 'pull_cursor'")) return [{value: '0'}];
-      if (sql.includes('FROM sync_rejected')) return [{count: leftover}];
+      if (sql.includes('FROM sync_rejected')) {
+        return [{count: sql.includes('attempt_count >=') ? stuck : leftover}];
+      }
       return [];
     },
   };
@@ -180,4 +182,28 @@ test('an apply-report reject is an error even when leftover COUNT is zero', asyn
   });
   const report = await client.sync();
   assert.match(report.error ?? '', /1 change from the server could not be applied/);
+});
+
+// A reject that has exhausted its retries can never apply — the allocation op
+// pausing backup today is keyed by its own JSON blob, so nothing will ever
+// match it. Blocking sync on it forever lets one dead row hide the health of
+// everything else, and with updates now costing a full reinstall that is an
+// expensive corner to be painted into.
+test('an exhausted reject stops blocking sync and is surfaced instead', async () => {
+  const {client} = stubbedClient({leftover: 0, stuck: 3});
+  const report = await client.sync();
+  assert.equal(report.error, undefined);
+  assert.equal(report.deadLetterCount, 3);
+});
+
+test('an exhausted reject is counted alongside outbox dead letters', async () => {
+  const {client} = stubbedClient({stuck: 2, deadLetters: 5});
+  assert.equal(await client.deadLetterCount(), 7);
+});
+
+// The escape hatch must not swallow a reject that is still worth retrying.
+test('a reject still inside its retry budget still reports as an error', async () => {
+  const {client} = stubbedClient({leftover: 1, stuck: 0});
+  const report = await client.sync();
+  assert.match(report.error ?? '', /could not be applied/);
 });
