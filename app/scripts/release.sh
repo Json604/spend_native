@@ -79,6 +79,48 @@ else
   exit 1
 fi
 
+# Verify WHO signed it, not just what version it claims.
+#
+# build.gradle falls back to DEBUG signing when the release credentials are
+# absent, silently. Everything above this point passes for a debug-signed APK:
+# the versionCode is right, the checksum is right, and it uploads fine. It just
+# cannot install over anything already out there, and the failure only shows up
+# on users' phones as a signature mismatch.
+#
+# The expected fingerprint is recorded in the repo so a machine without the
+# release keystore cannot publish, no matter how the build was invoked.
+APKSIGNER="$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort | tail -1 || true)"
+CERT_FILE="$ROOT/release-cert.sha256"
+if [[ -z "$APKSIGNER" ]]; then
+  echo "!!  apksigner not found; cannot verify who signed the APK. Refusing to" >&2
+  echo "    publish unverified - set ANDROID_HOME or install build-tools." >&2
+  exit 1
+fi
+CERT_SHA="$("$APKSIGNER" verify --print-certs "$APK" \
+  | sed -nE 's/.*certificate SHA-256 digest: ([0-9a-f]+).*/\1/p' | head -1)"
+if [[ -z "$CERT_SHA" ]]; then
+  echo "!!  Could not read the APK's signing certificate. Refusing to publish." >&2
+  exit 1
+fi
+echo "==> signed by $CERT_SHA"
+if [[ ! -f "$CERT_FILE" ]]; then
+  echo "!!  No $CERT_FILE recorded, so there is nothing to check this build" >&2
+  echo "    against. If the fingerprint above is the real release key, record it" >&2
+  echo "    once and re-run:" >&2
+  echo "        echo $CERT_SHA > $CERT_FILE" >&2
+  exit 1
+fi
+EXPECTED_SHA="$(tr -d '[:space:]' < "$CERT_FILE")"
+if [[ "$CERT_SHA" != "$EXPECTED_SHA" ]]; then
+  echo "!!  This APK is signed with the WRONG KEY. Refusing to publish." >&2
+  echo "        expected $EXPECTED_SHA" >&2
+  echo "        got      $CERT_SHA" >&2
+  echo "    A mismatch cannot install over an existing Spend. If the release" >&2
+  echo "    credentials are missing from ~/.gradle/gradle.properties, Gradle" >&2
+  echo "    silently signed this with the debug key." >&2
+  exit 1
+fi
+
 SHA="$(shasum -a 256 "$APK" | awk '{print $1}')"
 FILENAME="spend-$VERSION_NAME-$NEXT_CODE.apk"
 echo "==> sha256 $SHA"
