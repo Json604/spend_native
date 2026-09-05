@@ -77,9 +77,13 @@ export function normalizeRemoteCommand(operation: SyncOperation): Record<string,
   const derived = deriveCommandFromWire(operation, inner);
   if (derived) return derived;
 
+  // A pulled row exposes op_id and action; only an outbox row has id and op.
+  // Reading just the latter yielded commandId: undefined, which JSON.stringify
+  // drops entirely — so a reject got filed under its own JSON blob as the key,
+  // which nothing can ever match to clear it.
   return {
-    commandId: operation.id ?? operation.opId,
-    kind: operation.op,
+    commandId: operation.id ?? operation.opId ?? operation.op_id,
+    kind: operation.op ?? operation.kind,
     ...(typeof inner.expectedRevision === "number" ? { expectedRevision: inner.expectedRevision } : {}),
     payload: inner.payload ?? inner,
   };
@@ -122,6 +126,30 @@ export function deriveCommandFromWire(
         recurring: false,
       },
     };
+  }
+
+  // An allocation op carries no command name when it comes from a legacy import
+  // or a server-side repair. Without this branch it fell through to the generic
+  // path below and became an unroutable command, which the coordinator files in
+  // sync_rejected — and a single stuck reject makes every later pull report
+  // "changes from the server could not be applied", pausing backup for good.
+  if (entity === "transaction_allocations") {
+    if (action !== "upsert") return null;
+    const transactionId = asString(fields.transactionId) ?? asString(inner.transactionId);
+    const categoryId = asString(fields.categoryId) ?? asString(inner.categoryId);
+    if (!transactionId || !categoryId) return null;
+    // "migrated" is not an assignable source — the coordinator rejects it
+    // outright — so an imported row is recorded as the manual choice it stands
+    // for. amountMinor is deliberately dropped: assignCategory owns the whole
+    // transaction, and a split arrives as splitTransaction instead.
+    const rawSource = asString(fields.source) ?? asString(inner.source) ?? "manual";
+    const source = rawSource === "migrated" ? "manual" : rawSource;
+    const payload: Record<string, unknown> = { transactionId, categoryId, source };
+    const allocationId = asString(fields.allocationId) ?? asString(operation.entity_id);
+    if (allocationId) payload.allocationId = allocationId;
+    const confidence = fields.confidence ?? inner.confidence;
+    if (typeof confidence === "number") payload.confidence = confidence;
+    return { commandId, kind: "assignCategory", payload };
   }
 
   if (entity === "categories") {

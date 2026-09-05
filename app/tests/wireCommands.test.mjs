@@ -161,3 +161,51 @@ test('every wire id the server could see is a well-formed UUID', () => {
     assert.match(id, SERVER_UUID, `wireOperationId('sms-transaction:${index}') is not a UUID`);
   }
 });
+
+// A kind-less allocation op is what a legacy import and any server-side repair
+// send. There was no branch for it, so it fell to the generic path, which reads
+// `operation.id` and `operation.op` — fields a PULLED row does not have. The
+// command came out with no id and no kind, the coordinator could not route it,
+// and it landed in sync_rejected. Every later pull then threw "N changes from
+// the server could not be applied", which pauses backup permanently.
+test('a kind-less allocation upsert becomes an assignCategory command', () => {
+  const command = normalizeRemoteCommand({
+    op_id: '8c3bfe31-f5fd-4e28-88ae-ff3ec30e30b2',
+    entity_type: 'transaction_allocations',
+    entity_id: 'legacy-allocation:7a2e08d0',
+    action: 'upsert',
+    payload: {
+      opId: '8c3bfe31-f5fd-4e28-88ae-ff3ec30e30b2',
+      entity: 'transaction_allocations',
+      action: 'upsert',
+      source: 'manual',
+      fields: {
+        source: 'manual',
+        categoryId: 'custom:43b41629',
+        confidence: null,
+        amountMinor: 4000,
+        transactionId: 'legacy-transaction:a2d789bc',
+      },
+    },
+  });
+  assert.equal(command.kind, 'assignCategory');
+  assert.equal(command.commandId, '8c3bfe31-f5fd-4e28-88ae-ff3ec30e30b2');
+  assert.equal(command.payload.transactionId, 'legacy-transaction:a2d789bc');
+  assert.equal(command.payload.categoryId, 'custom:43b41629');
+  assert.equal(command.payload.source, 'manual');
+});
+
+// A pulled row exposes op_id and action, never id and op. Reading the wrong
+// ones produced `commandId: undefined`, and an undefined key is dropped by
+// JSON.stringify — so the reject was filed under the whole JSON blob as its
+// key, which no later command can ever match to clear it.
+test('an unroutable pulled op still carries an id derived from op_id', () => {
+  const command = normalizeRemoteCommand({
+    op_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+    entity_type: 'category_memory',
+    entity_id: 'whatever',
+    action: 'upsert',
+    payload: { fields: { note: 'unrecognised entity' } },
+  });
+  assert.equal(command.commandId, 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
+});
