@@ -14,8 +14,8 @@ function stubbedClient({leftover = 0, stuck = 0, deadLetters = 0, applyReport = 
   const nativeSync = {
     acknowledgeOutbox: async () => 0,
     recordOutboxFailure: async () => 0,
-    recoverDeadLettersOnce: async () => {
-      calls.push('recoverDeadLettersOnce');
+    recoverDeadLettersOnce: async key => {
+      calls.push(`recoverDeadLettersOnce:${key}`);
       return 0;
     },
     applyPulledOps: async commandsJson => {
@@ -75,6 +75,7 @@ test('retryRejectedOps runs before pull and leftover rejects become report.error
   assert.notEqual(pullAt, -1);
   assert.ok(retryAt < pullAt, `expected retry before pull, got ${calls.join(' -> ')}`);
   assert.match(report.error ?? '', /2 changes from the server could not be applied/);
+  assert.ok(calls.includes('recoverDeadLettersOnce:postgres_nul_recovery_v3'));
 });
 
 test('backUpEverything sends createTransactionFromAlert ops after categories and before budgets', async () => {

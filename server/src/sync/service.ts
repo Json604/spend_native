@@ -3,6 +3,7 @@ import type { Db } from '../db.js';
 import { ApiError } from '../errors.js';
 import { applyFieldLww, computePullCursor, type RowState, type SyncOp } from './conflict.js';
 import { canonicalOpId, deriveOpId } from './opIds.js';
+import { stripNulCharacters } from './sanitize.js';
 
 const TABLES: Record<string, string> = {
   transactions: 'transactions',
@@ -29,8 +30,14 @@ export class SyncService {
     const conflicts: unknown[] = [];
     try {
       await client.query('BEGIN');
+      // Full backups and outbox drains can arrive together from two devices.
+      // Their category writes share unique indexes and can deadlock when each
+      // transaction holds a different row. Serialize pushes for one account.
+      await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [userId]);
       for (const operation of operations) {
-        const result = await this.applyOne(client, userId, deviceId, operation);
+        // Bank SMS occasionally contains U+0000. PostgreSQL rejects that in
+        // JSONB and one poisoned alert otherwise rolls back the whole batch.
+        const result = await this.applyOne(client, userId, deviceId, stripNulCharacters(operation));
         if (result.conflict) conflicts.push(result.value); else applied.push(result.value);
       }
       await client.query('COMMIT');

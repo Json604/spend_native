@@ -9,7 +9,7 @@
     "build": "tsc",
     "start": "node dist/src/server.js",
     "migrate": "tsx src/migrate.ts",
-    "test": "node --test"
+    "test": "node --import tsx --test"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

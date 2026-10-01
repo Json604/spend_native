@@ -1,4 +1,4 @@
-import { deterministicOpId, transactionToBackupOps } from "./backupOps.ts";
+import { deterministicOpId, transactionToBackupOps, type BackupAlertRow } from "./backupOps.ts";
 import { nextPullCursor, normalizeRemoteCommand, parsePayload, wireOperationId, type SyncOperation } from "./wireCommands.ts";
 
 const BATCH_SIZE = 50;
@@ -107,11 +107,9 @@ export class SpendSyncClient {
     let pulled = 0;
     let lastError: string | undefined;
     try {
-      // v2: rows that dead-lettered because their wire id was malformed are
-      // retryable now that the id is a real UUID. Bumping the key gives each
-      // device exactly one more pass over them instead of stranding real
-      // edits — and clears the "needs attention" badge the old bug left.
-      await this.deps.nativeSync.recoverDeadLettersOnce("wire_uuid_recovery_v2");
+      // A bank SMS NUL used to make PostgreSQL reject an entire push batch.
+      // Retry its stranded local rows once after the server can accept them.
+      await this.deps.nativeSync.recoverDeadLettersOnce("postgres_nul_recovery_v3");
       pushed = await this.drainOutbox(await this.deps.secureDeviceId());
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
@@ -206,7 +204,7 @@ export class SpendSyncClient {
           WHERE deleted_at IS NULL
           ORDER BY id`,
       ),
-      this.deps.nativeCoordinator.query<Record<string, unknown>>(
+      this.deps.nativeCoordinator.query<BackupAlertRow & { transaction_id: string }>(
         `SELECT id, transaction_id, raw_sender, raw_body, received_at,
                 provider_message_id, subscription_id, bank_reference, parse_status
            FROM source_alerts
@@ -220,7 +218,7 @@ export class SpendSyncClient {
       ),
     ]);
 
-    const alertByTransaction = new Map<string, Record<string, unknown>>();
+    const alertByTransaction = new Map<string, BackupAlertRow>();
     for (const alert of alerts) {
       const transactionId = typeof alert.transaction_id === "string" ? alert.transaction_id : "";
       if (!transactionId || alertByTransaction.has(transactionId)) continue;
